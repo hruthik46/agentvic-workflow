@@ -1,0 +1,31 @@
+name: kairos-obsidian-bridge
+version: 1.0.0
+description: Writes per-session critique/learning/RCA to Obsidian vault on session-end. Replaces the standalone /usr/local/bin/agent-worker post-Hermes hook.
+author: Sai Hruthik + Claude (Anthropic)
+license: MIT
+hermes_min_version: "0.9.0"
+
+# Lifecycle hooks this plugin registers
+hooks:
+  - on_session_end       # write critique + extract learnings → Obsidian
+  - on_session_start     # log session-start trace → Obsidian (lightweight)
+  - post_tool_call       # tally tool calls per session for code-review-graph rubric
+
+# Tools this plugin makes available to Hermes (none — passive observer)
+tools: []
+
+# Slash commands registered for /commands menu
+commands:
+  - /vault-search         # delegates to karios-vault search
+  - /vault-recent         # delegates to karios-vault recent
+  - /vault-write          # delegates to karios-vault {kind} ...
+
+# Configuration this plugin reads
+config:
+  vault_path: /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline
+  agent_name_env: AGENT      # env var that holds the current agent name
+  trace_id_env: KAIROS_TRACE_ID
+  enable_critique: true
+  enable_learning_extraction: true
+  min_chars_for_critique: 500   # don't write if Hermes output < 500 chars
+  redact_secrets: true          # strip TELEGRAM_BOT_TOKEN, REDIS_PASSWORD, etc.

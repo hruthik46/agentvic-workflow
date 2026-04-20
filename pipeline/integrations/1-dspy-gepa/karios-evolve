@@ -1,0 +1,3 @@
+#!/bin/bash
+# karios-evolve — wraps DSPy+GEPA agent prompt evolution
+exec python3 /root/agentic-workflow/pipeline/integrations/1-dspy-gepa/kairos-evolve.py "$@"

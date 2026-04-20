@@ -1,0 +1,3 @@
+#!/bin/bash
+# karios-eval — wraps inspect eval against KAIROS pipeline tasks
+exec inspect eval /root/agentic-workflow/pipeline/integrations/2-inspect-ai/kairos_pipeline.py "$@"
