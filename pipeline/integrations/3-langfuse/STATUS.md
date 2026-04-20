@@ -1,66 +1,50 @@
 # 3-langfuse — STATUS
 
-## Code completeness: FULL + LIVE-READY
+## Code completeness: LIVE on 192.168.118.106
 
-Two files:
-- `kairos_langfuse_wrapper.py` — soft-import client, three context managers (`trace_dispatch`, `trace_hermes_call`, `trace_phase_event`), `init_langfuse()`, docker-compose template
-- `langfuse_dispatcher_patch.py` — monkey-patches `event_dispatcher.notify_phase_transition` + `send_to_agent` at import time. Soft-fails if env vars missing.
+- Server: `langfuse/langfuse:2` + `postgres:15` via docker-compose
+- URL: http://192.168.118.106:3001 (port 3000 was Grafana)
+- Project: kairos-pipeline (auto-created via LANGFUSE_INIT_*)
+- Wrapper symlinked into /var/lib/karios/orchestrator/
+- Dispatcher import wired (event_dispatcher.py:60)
+- All env vars in /etc/karios/secrets.env (LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY)
+- Smoke-tested 2026-04-20 16:05 — 2 traces ingested via API verification
 
-Wire-up is **one import line** at top of `event_dispatcher.py`:
-```python
-import langfuse_dispatcher_patch  # noqa: F401
+## Critical install constraint: SDK version pinning
+
+Langfuse server is **v2.95.11** (uses Postgres-only, no ClickHouse).
+Python SDK MUST be **<3.0** to match — install with:
 ```
-
-Without `LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY` set in env, the patch self-disables and the dispatcher runs unchanged. Safe to import unconditionally.
-
-## To activate
-
-```bash
-# 1. Bring up Langfuse server (Postgres + UI)
-cat /root/agentic-workflow/pipeline/integrations/3-langfuse/kairos_langfuse_wrapper.py \
-    | grep -A 30 "DOCKER_COMPOSE_TEMPLATE" \
-    > /opt/langfuse/docker-compose.yml
-cd /opt/langfuse
-# Replace <set-on-target> placeholders:
-#   POSTGRES_PASSWORD via openssl rand -base64 24
-#   NEXTAUTH_SECRET   via openssl rand -base64 32
-#   SALT              via openssl rand -base64 32
-#   ENCRYPTION_KEY    via openssl rand -hex 32
-docker compose up -d
-
-# 2. Open http://192.168.118.106:3000 → sign in → create project → copy keys
-
-# 3. Append to /etc/karios/secrets.env:
-echo "LANGFUSE_HOST=http://localhost:3000" >> /etc/karios/secrets.env
-echo "LANGFUSE_PUBLIC_KEY=pk-lf-..." >> /etc/karios/secrets.env
-echo "LANGFUSE_SECRET_KEY=sk-lf-..." >> /etc/karios/secrets.env
-
-# 4. Add the import line + restart
-ln -sf /root/agentic-workflow/pipeline/integrations/3-langfuse/langfuse_dispatcher_patch.py \
-       /var/lib/karios/orchestrator/langfuse_dispatcher_patch.py
-# Edit /var/lib/karios/orchestrator/event_dispatcher.py:
-#   add `import langfuse_dispatcher_patch  # noqa: F401` near the top of imports
-systemctl restart karios-orchestrator-sub
-
-# 5. Verify
-journalctl -u karios-orchestrator-sub --since '1 min ago' | grep langfuse
-# Expect: [langfuse] initialized (host=http://localhost:3000)
-#         [langfuse-patch] active: notify_phase_transition + send_to_agent wrapped
+pip install --break-system-packages "langfuse<3"
 ```
+v3+/v4+ SDK uses different schema validation and will fail `auth_check`
+against the v2 server with Pydantic field-missing errors.
 
-## What gets traced
+Migration to v3 server requires deploying ClickHouse + new compose file
+(see https://github.com/langfuse/langfuse/blob/main/docker-compose.yml).
+Heavyweight; deferred.
 
-- **Every `send_to_agent` call** → `dispatch-{agent}-{subject[:30]}` trace, with `gap_id` as `user_id` (groups all dispatches for one gap)
-- **Every `notify_phase_transition` event** → `phase-{event}` event with `from_agent`, `to_agent`, `rating`, `summary`
-- **Every Hermes generation** (when `trace_hermes_call` is wired into agent-worker — pending) → `hermes-{agent}` generation with model, prompt_chars, status, errors
+## What gets traced (LIVE)
 
-## Honest caveats
+Per langfuse_dispatcher_patch.py:
+- Every `send_to_agent` call → `dispatch-{agent}-{subject}` trace,
+  `user_id={gap_id}`, `session_id={trace_id}`
+- Every `notify_phase_transition` event → `phase-{event}` event with
+  from_agent, to_agent, rating, summary
 
-- **Hermes generation traces NOT yet wired** — only dispatcher-side traces are in the v7.17 patch. Adding agent-worker side requires editing `/usr/local/bin/agent-worker run_hermes_pty()`, deferred to next deploy.
-- **Self-hosted server burden**: Postgres + Langfuse server eats ~500MB RAM, ~100MB disk per 100K traces. Set up `/etc/cron.d/langfuse-prune` for >30-day trace deletion if running long-term.
-- **Trace data is full prompts + responses** — secrets in prompts WILL appear in Langfuse UI. Consider redaction (Langfuse SDK supports `metadata.scrubbing` callback) before exposing to non-admins.
-- **Soft-import means typos in env-var names silently disable tracing**. Verify with the journalctl check above after restart.
+`trace_hermes_call` context manager available but not yet wired into
+agent-worker (deferred to next maintenance window — requires editing
+`run_hermes_pty()`).
 
-## Cost / scale
+## Operations
 
-Self-hosted: free. Cloud Langfuse Cloud: ~$50/month at our trace volume (~10K traces/day per agent × 9 agents). Self-host wins for KAIROS.
+- Bootstrap creds: /opt/langfuse/.bootstrap.env (mode 600)
+- Web UI: http://192.168.118.106:3001 (login ops@karios.local + bootstrap pwd)
+- Setup script: pipeline/integrations/3-langfuse/langfuse_setup.sh
+
+## Honest residuals
+
+- Hermes-side trace_hermes_call NOT yet wired (only dispatcher-side is live)
+- Self-hosted, Postgres-only — limited to ~50K traces/day per Langfuse v2
+  guidance. Migrate to v3+ClickHouse when scale demands it.
+- Bootstrap user has admin role; create real org users via web UI.
