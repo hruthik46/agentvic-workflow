@@ -1,1 +1,0 @@
-5 docs written to /var/lib/karios/iteration-tracker/ARCH-IT-ARCH-v9/phase-2-arch-loop/iteration-1, all >2KB. Sai-authored stand-in due to architect Hermes producing 320K prose without tool calls (round-4 finding).
