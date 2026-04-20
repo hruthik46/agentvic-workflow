@@ -1,7 +1,7 @@
 ---
 name: kairos-pipeline-operations
-description: Use when operating, debugging, or extending the KAIROS 9-agent pipeline running on 192.168.118.106. Covers the 6-phase lifecycle, all message subjects, the 5 ways to inject work, the iteration loop, and the 47-patch history of v6→v7.6.
-version: 1.0.0
+description: Use when operating, debugging, or extending the KAIROS 9-agent pipeline running on 192.168.118.106. Covers the 6-phase lifecycle, all message subjects, the 5 ways to inject work, bidirectional Telegram chat (custom hitl-listener + /ask + /ask-deep + free-text dispatch), the proper PTY watchdog (v7.8 — kills only Hermes not agent-worker), the progress probe (kills agent if iteration-tracker doesn't grow), the iteration loop, and the 62-patch history of v6→v7.8.
+version: 1.1.0
 author: Sai Hruthik + Claude (Anthropic)
 license: MIT
 metadata:
@@ -101,8 +101,19 @@ When you emit a message:
 
 ## How to talk to the live pipeline (5 ways, ascending coupling)
 
-### 1. Telegram channel `Hermes` (`-1003999467717`) — read-only
+### 1. Telegram channel `Hemes_106` (`-1003981473251`) — BIDIRECTIONAL (v7.7+)
 Every `notify_phase_transition()` call lands here. Sai sees: `🔍 [ARCH-REVIEWED] gap-id — score 8/10  Handing off: architect-blind-tester → backend+frontend (Phase 3)`.
+
+**Sai can ALSO chat back** — custom `karios-hitl-listener` accepts:
+- `/status` — agents + active gaps (instant)
+- `/ask <q>` — fast deterministic status reply (~2s)
+- `/ask-deep <q>` — orchestrator-profile Hermes round-trip with full context (~30-90s)
+- `/pending`, `/approve <id>`, `/reject <id>`, `/stop`, `/resume`, `/help`
+- **Free text** (no slash) → auto-dispatched as `[REQUIREMENT]` (creates a new gap, auto-numbered ARCH-IT-N)
+
+**Bot ownership note**: bot must be owned by the operator's Telegram account (otherwise `/setprivacy` in BotFather won't list it and Privacy Mode can't be disabled). Current bot is `hermes_106_bot` owned by Sai. To re-create on another node: `/newbot` in BotFather → `/setprivacy → Disable` → add bot as channel admin → swap token in `/etc/karios/secrets.env`.
+
+**Hermes gateway is DM-only** — `channel_directory.json` only stores `type: dm`. For channel chat, use the custom `karios-hitl-listener`.
 
 ### 2. SSH + `journalctl`
 ```bash
@@ -155,16 +166,22 @@ Per-gap artifacts live at:
 
 The HARD PRE-SUBMIT GATE (v7.3) requires all 5 phase-2 docs ≥ 2KB before `[ARCH-COMPLETE]` is accepted.
 
-## Tool-use enforcement (v7.5)
+## Tool-use enforcement (v7.5 + v7.8)
 
-`/root/.hermes/config.yaml` has `agent.tool_use_enforcement: true`. This forces tool-use for every model regardless of name (the `auto` default only matched `gpt`/`codex`/`gemini`/`gemma`/`grok`, none of our MiniMax-M2.7 agents).
+`/root/.hermes/config.yaml` has `agent.tool_use_enforcement: true`. This forces tool-use for every model regardless of name (the `auto` default only matched `gpt`/`codex`/`gemini`/`gemma`/`grok`, none of our MiniMax-M2.7 agents). **Caveat: this is SOFT prompt-level steering, not hard enforcement** — model can still ignore.
 
-In addition, `agent-worker` uses `run_hermes_pty()` (v7.6 E) — a PTY-streamed Hermes invocation that counts output tokens and detects `tool_use` events. If you produce >4000 chars without ANY tool call, the watchdog SIGKILLs your session and retries once with the prepend:
+**Two enforcement layers**:
+
+**v7.8 PTY watchdog** (per-session): `agent-worker` spawns Hermes with `start_new_session=True` (its own PGID) and runs a stream_reader thread that counts output chars + detects `tool_use` events. If >6000 chars with zero tool calls → SIGTERM ONLY the Hermes PGID (NOT agent-worker), then agent-worker retries once with prepend:
 ```
 BEGIN by calling karios-vault.search. Do not output prose first.
 ```
 
-**Practical implication for you:** start every task with a tool call (`karios-vault search`, `read_file`, `get_minimal_context`, etc.). Don't deliberate in prose first.
+**v7.8 progress probe** (per-gap): dispatcher main loop checks each active gap every cycle; if iteration-tracker bytes don't grow in 8 min → `⚠ PROGRESS-STALL` Telegram; if still no growth at 16 min → `_kill_agent_hermes()` SIGTERMs the agent's Hermes session via `pgrep` + `kill 15` + `💀 PROGRESS-KILL` Telegram. Reset on growth.
+
+**Practical implication for you:** start every task with a tool call (`karios-vault search`, `read_file`, `get_minimal_context`, etc.). Don't deliberate in prose first. Watchdog will kill you and retry.
+
+**Critical bug history** (v7.6 → v7.7 → v7.8): the original watchdog used `os.killpg(os.getpgid(master_fd), SIGTERM)` — `master_fd` is a PTY file descriptor, not a PID, so `getpgid(fd)` returned the agent-worker's own PGID and killpg killed agent-worker itself. systemd marked the service dead. Fixed in v7.8 by spawning Hermes with `start_new_session=True` and using `Popen.pid` directly via a shared mutable list passed to stream_reader.
 
 ## code-review-graph (v7.4) — 8.2× token savings
 

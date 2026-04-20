@@ -166,7 +166,7 @@ def handle_command(r, text: str) -> str:
         # Active gaps
         try:
             state = json.loads((COORD / 'state.json').read_text())
-            active = list(state.get('active_gaps', {}).keys())
+            active = [k for k, v in state.get('active_gaps', {}).items() if v.get('state') not in ('completed', 'closed', 'cancelled', 'escalated')]
         except Exception:
             active = ['(state read failed)']
         return f"Agents:\n" + "\n".join(rows) + f"\n\nActive gaps: {active}"
@@ -181,8 +181,45 @@ def handle_command(r, text: str) -> str:
             f.unlink()
         return "▶️ META_STOP cleared. Meta-loop may resume."
 
+    if cmd == '/ask-deep':
+        question = text[10:].strip()
+        if not question:
+            return "usage: /ask-deep <your question>  (slower, ~60-120s, full Hermes round-trip)"
+        try:
+            r.xadd('stream:orchestrator', {
+                'from': 'human-telegram',
+                'to': 'orchestrator',
+                'subject': '[HUMAN-DEEP-MESSAGE] from sai',
+                'body': question,
+                'gap_id': '',
+                'trace_id': f'trace_human_deep_{int(__import__("time").time())}',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            })
+            return f"🔬 Deep question queued — architect will read vault + iteration-tracker + state and reply with a detailed answer in 60-120s.\nQ: {question[:80]}"
+        except Exception as e:
+            return f"❌ Failed to queue deep question: {e}"
+
+    if cmd == '/ask':
+        question = text[5:].strip()
+        if not question:
+            return "usage: /ask <your question>  (fast deterministic status)"
+        # Route to orchestrator as a HUMAN-MESSAGE for an agent to answer
+        try:
+            r.xadd('stream:orchestrator', {
+                'from': 'human-telegram',
+                'to': 'orchestrator',
+                'subject': f'[HUMAN-MESSAGE] from sai',
+                'body': question,
+                'gap_id': '',
+                'trace_id': f'trace_human_{int(__import__("time").time())}',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            })
+            return f"📨 Question queued (architect will reply within ~60s): {question[:80]}"
+        except Exception as e:
+            return f"❌ Failed to queue: {e}"
+
     if cmd == '/help':
-        return ("commands:\n/approve [id]\n/reject [id]\n/pending\n/status\n/stop\n/resume\n/help")
+        return ("commands:\n/approve [id]\n/reject [id]\n/pending\n/status\n/stop\n/resume\n/ask <question>  (fast deterministic status)\n/ask-deep <question>  (full Hermes round-trip, ~60-120s)\n/help\n\nNon-slash text is auto-routed to the orchestrator as a [REQUIREMENT].")
 
     return ""  # not a recognized command — silent
 
@@ -198,11 +235,29 @@ def handle_update(r, update: dict):
         # message from a chat we don't trust — ignore silently
         return
     text = msg.get('text', '')
-    if not text or not text.startswith('/'):
+    if not text:
         return
-    reply = handle_command(r, text)
-    if reply:
-        telegram_send(reply)
+    if text.startswith('/'):
+        reply = handle_command(r, text)
+        if reply:
+            telegram_send(reply)
+        return
+    # v7.7: Non-slash text → route to orchestrator as [REQUIREMENT]
+    try:
+        import time as _time
+        gap_id = f'REQ-TG-{int(_time.time())}'
+        r.xadd('stream:orchestrator', {
+            'from': 'human-telegram',
+            'to': 'orchestrator',
+            'subject': f'[REQUIREMENT] {gap_id} — Telegram-dispatched requirement',
+            'body': text,
+            'gap_id': gap_id,
+            'trace_id': f'trace_tg_{gap_id}',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        })
+        telegram_send(f"📥 Received as {gap_id}. Pipeline starting; phase events will land here.")
+    except Exception as e:
+        telegram_send(f"❌ Failed to dispatch: {e}")
 
 
 def main():

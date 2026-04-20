@@ -2175,6 +2175,102 @@ def _update_active_gap_state(gap_id: str, phase: str = None, state: str = None, 
         print(f"[dispatcher] _update_active_gap_state error: {_e}")
 
 
+
+# v7.8: Progress probe — detect stuck active phases
+_PROGRESS_PROBE_STATE = {}  # gap_id -> {"last_check_ts": int, "last_size": int, "stale_count": int}
+PROGRESS_STALL_SECS = 480  # 8 min with no growth → considered stuck
+PROGRESS_KILL_AFTER_STALLS = 2  # 2 consecutive stalls → kill agent
+
+def _gap_iter_tracker_size(gap_id: str) -> int:
+    """Total bytes in this gap's iteration-tracker dir."""
+    base = Path(f"/var/lib/karios/iteration-tracker/{gap_id}")
+    if not base.exists():
+        return 0
+    total = 0
+    try:
+        for f in base.rglob("*"):
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total
+
+def _kill_agent_hermes(agent_short: str) -> bool:
+    """Kill the Hermes child of the named agent's worker (uses pgrep + kill)."""
+    try:
+        out = subprocess.run(["pgrep", "-f", f"hermes chat --profile {agent_short}"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        pids = [p for p in out.split() if p.isdigit()]
+        for pid in pids:
+            try:
+                os.kill(int(pid), 15)  # SIGTERM
+                print(f"[probe] killed Hermes pid={pid} (agent={agent_short})")
+            except Exception as e:
+                print(f"[probe] kill {pid} failed: {e}")
+        return bool(pids)
+    except Exception as e:
+        print(f"[probe] pgrep failed: {e}")
+        return False
+
+def progress_probe_check():
+    """Called periodically from dispatcher main loop. Detects + reacts to stuck gaps."""
+    import time as _t
+    try:
+        st = load_state() or {}
+        ag = st.get("active_gaps", {})
+        now = int(_t.time())
+        for gap_id, ge in ag.items():
+            if ge.get("state") in ("completed", "closed", "cancelled", "escalated"):
+                continue
+            phase = ge.get("phase", "")
+            if not phase or phase in ("completed", "closed", "idle"):
+                continue
+            # Check iteration-tracker growth
+            cur_size = _gap_iter_tracker_size(gap_id)
+            ps = _PROGRESS_PROBE_STATE.setdefault(gap_id, {"last_check_ts": now, "last_size": cur_size, "stale_count": 0})
+            elapsed = now - ps["last_check_ts"]
+            if elapsed < PROGRESS_STALL_SECS:
+                continue  # not yet time to re-evaluate
+            grew = cur_size > ps["last_size"]
+            if grew:
+                # Reset stale counter
+                ps["stale_count"] = 0
+                ps["last_size"] = cur_size
+                ps["last_check_ts"] = now
+            else:
+                ps["stale_count"] += 1
+                ps["last_check_ts"] = now
+                # Determine which agent owns this phase
+                phase_to_agent = {
+                    "phase-2-arch-loop": "architect",
+                    "phase-2-architecture": "architect",
+                    "phase-3-coding": "backend",
+                    "phase-3-coding-sync": "backend",
+                    "phase-4-testing": "code-blind-tester",
+                    "phase-5-deployment": "devops",
+                    "phase-6-monitoring": "monitor",
+                }
+                owner = phase_to_agent.get(phase, "unknown")
+                if ps["stale_count"] == 1:
+                    msg = (f"⚠ PROGRESS-STALL: {gap_id} in {phase} produced 0 new files in {PROGRESS_STALL_SECS // 60} min. "
+                           f"Owner: {owner}. Watchdog will kill+retry on next stall ({PROGRESS_KILL_AFTER_STALLS - 1} more).")
+                    telegram_alert(msg)
+                    print(f"[probe] {msg}")
+                elif ps["stale_count"] >= PROGRESS_KILL_AFTER_STALLS and owner != "unknown":
+                    killed = _kill_agent_hermes(owner)
+                    msg = (f"💀 PROGRESS-KILL: {gap_id} in {phase} stuck for {ps['stale_count'] * PROGRESS_STALL_SECS // 60} min. "
+                           f"Killed {owner} Hermes (success={killed}). agent-worker will pick up next message; iteration counter unchanged.")
+                    telegram_alert(msg)
+                    print(f"[probe] {msg}")
+                    ps["stale_count"] = 0  # reset after kill
+    except Exception as e:
+        print(f"[probe] error: {e}")
+
+
+
 def _sanitize_gap_id(gid: str) -> str:
     """v7.4: Truncate runaway gap_ids and strip non-id chars (em-dash prose tail bug)."""
     if not gid:
@@ -2226,6 +2322,161 @@ def parse_message(msg_id: str, data: dict):
                 print(f"[dispatcher] schema-violation log failed: {_qe}")
         except Exception as _ve:
             print(f"[dispatcher] schema validation error: {type(_ve).__name__}: {_ve}")
+
+    # v7.7.1: Human DEEP chat — answer with orchestrator profile via async Hermes subprocess
+    if subject.startswith("[HUMAN-DEEP-MESSAGE]"):
+        question = body
+        tid = trace_id or new_trace_id(op="human_deep")
+        def _answer_async(q, t):
+            import subprocess as _sp, json as _j, time as _t
+            from pathlib import Path as _P
+            try:
+                # Gather context for orchestrator profile
+                ctx = []
+                ctx.append("## Live pipeline state (state.json)")
+                try:
+                    st = _j.load(open("/var/lib/karios/orchestrator/state.json"))
+                    ctx.append(_j.dumps({"active_gaps": st.get("active_gaps", {})}, indent=2)[:3000])
+                except Exception as e:
+                    ctx.append(f"(state.json read error: {e})")
+                ctx.append("\n## Recent dispatcher events (last 60 lines)")
+                try:
+                    out = _sp.run(["journalctl", "-u", "karios-orchestrator-sub", "--since", "20 min ago",
+                                   "--no-pager", "-n", "60"], capture_output=True, text=True, timeout=10).stdout
+                    ctx.append(out[-3500:])
+                except Exception as e:
+                    ctx.append(f"(journalctl error: {e})")
+                ctx.append("\n## Active gap iteration-tracker contents")
+                for gid in (st.get("active_gaps", {}).keys() if isinstance(st, dict) else []):
+                    g_state = st["active_gaps"].get(gid, {}).get("state")
+                    if g_state in ("completed", "closed"): continue
+                    gd = _P(f"/var/lib/karios/iteration-tracker/{gid}")
+                    if gd.exists():
+                        files = list(gd.rglob("*.md"))[:20] + list(gd.rglob("*.json"))[:10]
+                        ctx.append(f"\n### {gid} files:")
+                        for f in files:
+                            try:
+                                size = f.stat().st_size
+                                ctx.append(f"  {f.relative_to(gd)} ({size}B)")
+                            except Exception:
+                                pass
+                ctx.append("\n## Recent vault critiques (last 5)")
+                try:
+                    cd = _P("/opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/critiques")
+                    if cd.exists():
+                        recent = sorted(cd.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:5]
+                        for f in recent:
+                            ctx.append(f"  - {f.name}")
+                except Exception:
+                    pass
+                ctx.append("\n## Heartbeat ages")
+                try:
+                    now = int(_t.time())
+                    hd = _P("/var/lib/karios/heartbeat")
+                    if hd.exists():
+                        for f in sorted(hd.glob("*.beat")):
+                            try:
+                                ts = int(f.read_text().strip())
+                                ctx.append(f"  {f.stem}: {now - ts}s")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                full_ctx = "\n".join(ctx)
+                prompt = (
+                    "You are the KAIROS pipeline ORCHESTRATOR responding to Sai via Telegram.\n"
+                    "You have full visibility into the live pipeline state below.\n"
+                    "Answer the user question DIRECTLY and IN DETAIL using only the data provided.\n"
+                    "Do NOT speculate. Do NOT invoke tools. Just synthesize a clear multi-paragraph answer.\n"
+                    "Format: plain text (no Markdown). Keep under 3500 chars (Telegram limit).\n\n"
+                    f"USER QUESTION:\n  {q}\n\n"
+                    f"=== LIVE STATE ===\n{full_ctx}\n\n"
+                    "Your answer:"
+                )
+                # Write prompt to a tempfile so we don't need to escape shell
+                pf = _P(f"/tmp/ask_deep_{int(_t.time())}.txt")
+                pf.write_text(prompt)
+                # Invoke Hermes orchestrator profile in non-interactive mode
+                r = _sp.run(
+                    ["/root/.local/bin/hermes", "chat", "--profile", "orchestrator",
+                     "--max-turns", "3", "-q", prompt[:30000]],
+                    capture_output=True, text=True, timeout=180,
+                    env={**__import__("os").environ, "HERMES_NO_TUI": "1"}
+                )
+                pf.unlink(missing_ok=True)
+                # Hermes outputs banner + answer; extract text after the banner
+                out = (r.stdout or "") + (r.stderr or "")
+                # Strip the banner (everything before the last "─" line) and ANSI codes
+                import re as _re
+                ansi = _re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+                clean = ansi.sub("", out)
+                # Take the last 3500 chars as the answer (or look for marker)
+                answer = clean.strip()[-3500:]
+                if not answer:
+                    answer = "(orchestrator returned empty output)"
+                telegram_alert(f"🤖 (orchestrator) {answer}")
+                print(f"[dispatcher] /ask-deep answered ({len(answer)} chars, trace={t})")
+            except _sp.TimeoutExpired:
+                telegram_alert("⏱ /ask-deep timed out (180s). Pipeline may be busy; try /ask for fast status.")
+            except Exception as ex:
+                telegram_alert(f"❌ /ask-deep error: {ex}")
+                print(f"[dispatcher] /ask-deep error: {ex}")
+        threading.Thread(target=_answer_async, args=(question, tid), daemon=True).start()
+        telegram_alert("🔬 Reading state + iteration-tracker + dispatcher logs + vault. Orchestrator answer in 30-90s...")
+        print(f"[dispatcher] [HUMAN-DEEP-MESSAGE] thread spawned (trace={tid})")
+        return
+
+    # v7.7: agent reply destined for Telegram (used by /ask-deep flow)
+    if subject.startswith("[TELEGRAM-REPLY]"):
+        # Strip the prefix to get the answer text
+        try:
+            answer = subject.split("]", 1)[1].strip() if "]" in subject else ""
+            if not answer:
+                answer = body.strip()
+            if not answer:
+                answer = "(empty answer from agent)"
+            telegram_alert(f"🤖 {answer[:3500]}")
+            print(f"[dispatcher] [TELEGRAM-REPLY] forwarded to telegram ({len(answer)} chars)")
+        except Exception as _te:
+            print(f"[dispatcher] [TELEGRAM-REPLY] handler error: {_te}")
+        return
+
+    # v7.7: Human chat from Telegram via /ask — answer with current pipeline status
+    if subject.startswith("[HUMAN-MESSAGE]"):
+        try:
+            st = load_state() or {}
+            ag = st.get("active_gaps", {})
+            active = [k for k, v in ag.items() if v.get("state") not in ("completed", "closed")]
+            completed = [k for k, v in ag.items() if v.get("state") == "completed"]
+            # Build a quick status reply
+            reply_lines = [f"📊 Pipeline status (you asked: {body[:80]})"]
+            reply_lines.append(f"Active gaps: {len(active)}")
+            for g in active[:5]:
+                e = ag[g]
+                reply_lines.append(f"  • {g}: {e.get('phase', '?')} iter={e.get('iteration', 1)}")
+            reply_lines.append(f"Completed (recent): {len(completed)}")
+            for g in completed[-3:]:
+                reply_lines.append(f"  ✓ {g}")
+            # Heartbeat ages
+            import time as _t, os as _os
+            now = int(_t.time())
+            hb = []
+            for f in sorted(_os.listdir("/var/lib/karios/heartbeat") if _os.path.isdir("/var/lib/karios/heartbeat") else []):
+                if not f.endswith(".beat"): continue
+                try:
+                    ts = int(open(f"/var/lib/karios/heartbeat/{f}").read().strip())
+                    age = now - ts
+                    icon = "✓" if age < 120 else "⚠"
+                    hb.append(f"{icon} {f[:-5]}={age}s")
+                except Exception:
+                    pass
+            reply_lines.append("Agents: " + " ".join(hb[:9]))
+            telegram_alert("\n".join(reply_lines))
+            print(f"[dispatcher] [HUMAN-MESSAGE] answered via telegram_alert")
+        except Exception as _e:
+            print(f"[dispatcher] [HUMAN-MESSAGE] handler error: {_e}")
+            telegram_alert(f"❌ /ask handler error: {_e}")
+        return
 
     # ── New requirement ────────────────────────────────────────────────────
     if subject.startswith("[REQUIREMENT]"):
@@ -2661,9 +2912,15 @@ def check_stalled_gaps():
         "3-coding-testing": 20 * 60,
     }
     stalled = []
-    for gid in state.get("active_gaps", {}):
+    for gid, ge in state.get("active_gaps", {}).items():
+        # v7.8: skip gaps marked completed/closed/cancelled in state.json — dispatcher should NOT
+        # nudge them. ARCH-IT-016 cost ~9 hours of telegram noise because this filter was missing.
+        if ge.get("state") in ("completed", "closed", "cancelled", "escalated"):
+            continue
         g = load_gap(gid)
         phase = g.get("phase", "")
+        if phase in ("completed", "closed"):
+            continue
         updated_at = g.get("updated_at", g.get("started_at", ""))
         if not updated_at or phase not in PHASE_TIMEOUTS:
             continue
@@ -2881,7 +3138,7 @@ def main():
             assigned = gap.get("assigned_agent", "unknown")
             tid = gap.get("trace_id", new_trace_id(gid, "orchestrator", "stalled"))
             # Telegram only every 3rd nudge to avoid spam
-            if nudge_count % 3 == 0:
+            if nudge_count == 0:
                 telegram_alert(f"STALLED: {gid} in {phase} (iter {iteration}) for {age_min}min. Nudge {nudge_count+1}. Backoff={backoff_seconds}s.")
             if assigned in ["architect", "backend", "frontend", "devops", "tester"]:
                 send_to_agent(assigned,

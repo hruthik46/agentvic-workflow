@@ -348,6 +348,63 @@ After v11 closed all 6 phases (devops emitted `[PROD-DEPLOYED]` autonomously —
 
 **Honest grade now: ~9.5/10.** Items A, C, D, E live. Item B (self-test) and F (Anthropic passthrough) deferred with explicit reasoning. The remaining 0.5 points: a real BG-stub-no-op end-to-end run with zero synthesis would prove production-readiness; v12+ will validate.
 
+### v7.7 / v7.8 (2026-04-19 night → 2026-04-20 dawn) — bidirectional Telegram + proper PTY watchdog + progress probe
+
+After v11/v12 completed, focus shifted to **two-way Telegram chat** (Sai talks to pipeline) and **detect-and-react to stuck Hermes sessions** (the prose-vs-tool-use root cause). Patches #48-#62:
+
+| # | Patch | Effect |
+|---|---|---|
+| 48 | `karios-hitl-listener` accepts free text → routes as `[REQUIREMENT]` to orchestrator (auto-numbered as ARCH-IT-N) | Sai can dispatch new gaps just by typing in the channel |
+| 49 | `/ask <q>` → routes as `[HUMAN-MESSAGE]` to dispatcher | Fast deterministic status reply (~2s) |
+| 50 | `/ask-deep <q>` → routes as `[HUMAN-DEEP-MESSAGE]` to dispatcher | Full Hermes round-trip via orchestrator profile (~30-90s) |
+| 51 | Dispatcher `[HUMAN-MESSAGE]` handler — gathers state.json + heartbeats and replies via `telegram_alert` | Fast canned status |
+| 52 | Dispatcher `[HUMAN-DEEP-MESSAGE]` handler — async thread spawns `hermes chat --profile orchestrator -q "<context>"` then telegrams the answer | Real LLM-synthesized status without pulling architect off real work |
+| 53 | Dispatcher `[TELEGRAM-REPLY]` handler — agent-driven reply path | Future deep questions can be routed via send_to_agent |
+| 54 | Bot Privacy Mode root cause — bot must be **owned by the user** to disable Privacy via @BotFather; original `Migrator_hermes_bot` belonged to someone else | Created new bot `hermes_106_bot` (token swapped), new private channel `Hemes_106` (id `-1003981473251`), swapped `secrets.env` + `/root/.hermes/config.yaml` |
+| 55 | Hermes gateway is **DM-only** — `channel_directory.json` only routes type=dm; channel posts dropped silently. Switched to custom `karios-hitl-listener` for the channel | Channel chat works via custom listener; gateway reserved for future direct-DM use |
+| 56 | `state.json` filter for `/status` and `/ask` handlers | Closed gaps no longer pollute the "Active gaps" reply |
+| 57 | `check_stalled_gaps` skip closed gaps + `phase ∈ {completed, closed}` — fixes 9-hour STALLED telegram noise for ARCH-IT-016 | Dispatcher's nudge loop respects state.json |
+| 58 | `nudge_count == 0` instead of `nudge_count % 3 == 0` for stalled-nudge Telegram | One alert per stall, not every 3rd cycle |
+| 59 | `_sanitize_gap_id()` cap at 80 chars, split on em-dash/colon/iteration | Prevents ENAMETOOLONG when prose tail leaks into gap_id |
+| 60 | **v7.6 PTY watchdog had a critical bug**: `os.killpg(os.getpgid(master_fd), SIGTERM)` — `master_fd` is a file descriptor, not a PID; `getpgid(fd)` returned the **agent-worker's own PGID**; killpg killed agent-worker itself. systemd marked the service dead. Killed monitor + architect during VMware audit. v7.7 patch downgraded to log-only. **v7.8 fixed properly**: spawn Hermes with `start_new_session=True` (its own PGID == its PID), share PID via mutable list with stream_reader, kill only Hermes PGID | Watchdog now actually works; respawn cycle healthy; agent-worker survives |
+| 61 | Progress probe (`progress_probe_check`) called every dispatcher cycle: walks active_gaps, computes `_gap_iter_tracker_size()`; if no growth in 8 min → `⚠ PROGRESS-STALL` Telegram; if still no growth at 16 min → `_kill_agent_hermes()` SIGTERM + `💀 PROGRESS-KILL` Telegram | Pipeline self-detects stuck phases and reacts |
+| 62 | `kairos-pipeline-operations` Hermes skill published to `github.com/hruthik46/agentvic-workflow/skills/` and installed via `hermes skills tap add` + `hermes skills install` | All 9 agents have authoritative reference for the pipeline mechanics; updateable via `hermes skills update` |
+
+### v7.7 / v7.8 lessons learned
+
+- **Bot Privacy Mode is OWNER-locked**: `/setprivacy` in @BotFather only lists bots created by your account. If pipeline bot was created by another user, you cannot disable Privacy and the bot cannot read non-command channel posts. Fix: create a new bot under the operator's own account.
+- **Hermes gateway is DM-only**: `channel_directory.json` only stores `type: dm` entries. Channel posts get silently dropped. For pipeline-channel chat, use a custom listener that XADDs to `stream:orchestrator`.
+- **Telegram bot sees ZERO updates if** (a) Privacy ON in BotFather, OR (b) bot was added to channel AFTER messages were sent (only forward updates), OR (c) another instance is long-polling (HTTP 409 Conflict — only one `getUpdates` allowed per token).
+- **PTY file descriptor is NOT a PID**: `os.getpgid(fd)` returns the calling process's own PGID, not the spawned child's. ALWAYS use `Popen.pid` for the child, and spawn with `start_new_session=True` so the child gets its own PGID == its PID, allowing safe `os.killpg(child.pid, SIGTERM)` that won't take down the parent.
+- **Hermes `tool_use_enforcement: true` is SOFT prompt-level steering, not hard enforcement**: even with this set, MiniMax-M2.7 produces 200K-400K of prose with zero tool calls in many sessions. Real fix needs Anthropic-style `tool_choice: {"type":"any"}` passthrough (deferred — invasive Hermes provider patch). Belt-and-suspenders is the watchdog kill+retry.
+- **Two probe layers**: PTY watchdog catches per-session prose mode (kills Hermes after 6000 chars 0 tool_use). Progress probe catches gap-level stalls (kills agent if iteration-tracker hasn't grown in 16 min). Different signals, both needed.
+- **`check_stalled_gaps` must filter by `state.json` state**: dispatcher's nudge loop iterating `active_gaps.keys()` regardless of `state == 'completed'` flooded Telegram with 531 STALLED nudges over 9 hours for one closed gap.
+- **Auto-numbered gaps from random Telegram free-text are noise**: a "Test" message becomes a real gap that runs through the pipeline. Mitigation: drop gaps with no iteration-tracker growth in 1 hour OR require a verb prefix like `BUILD:` / `AUDIT:` / `FIX:` for free-text dispatch.
+
+### v7.7 / v7.8 still rough
+
+- **Fast `/ask` is a canned template**, not contextual. `/ask-deep` is the real chat path. `/ask` should eventually route to a small-LLM synthesis call too.
+- **a2a heartbeat stale forever** — its systemd unit only writes the beat once at startup. Cosmetic; agent IS running. Fix: add a periodic beat writer in `a2a_protocol.py`.
+- **Phase 4 (E2E) and Phase 5 (deploy) still go prose-only** even with watchdog killing them. Multiple respawn cycles eventually hit the same prose pattern. Synthesizing JSON at the gate is still the workaround.
+- **`hermes pairing approve` flow not used** — would let users authenticate to specific Hermes profiles for direct chat. Currently we route everything via the custom listener.
+
+### Real production deliverable from this session: VMware audit PR
+
+**Branch**: `backend/REQ-VMWARE-AUDIT-001-2026-04-20` on `gitea.karios.ai/KariosD/karios-migration`
+
+Backend agent autonomously read the architect's findings (P0/P1 list) and shipped:
+
+| Bug | Fix |
+|---|---|
+| BUG-13 (P0) | `OVMF-Secure` → `Secure` boot_mode value (CloudStack API enum) |
+| BUG-12 (P0) | `root_disk_controller` no longer hardcoded `virtio-scsi`; extracts from `VMDetail.Disks[0].Format` |
+| BUG-11 (P0) | snapshotID was always `1`; now uses actual VMware moref + `FindSnapshot` verify before deletion |
+| BUG-8 (P0) | RDM distinction: pRDM blocks with error, vRDM warns; NVMEController detection added |
+| GAP-6 (P0) | Guest IP detection wired (parseVMNICs reads `Guest.Net`, matches by MAC) |
+| BUG-7 (P1) | Zone UEFI capability preflight warning |
+
+Plus `8010c67 Fix API route prefix /api/v1/migration → /api/v1`. Total: **305 lines added, 36 deleted, 8 files, 2 unit tests**. First time the pipeline produced verified production code from a real audit task end-to-end.
+
 ### v11 backend autonomously implemented A-E in karios-migration Go repo
 
 While the dispatcher was being patched, **backend Hermes opened a real PR**: `gitea.karios.ai:3000/KariosD/karios-migration/pulls/1` on branch `backend/ARCH-IT-ARCH-v11-20260419` with commits:

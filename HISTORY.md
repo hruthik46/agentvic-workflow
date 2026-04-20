@@ -80,6 +80,16 @@ This is the timeline. For deep technical detail per version, read [knowledge/PIP
 
 **Round 6 (ARCH-IT-ARCH-v11)**: 76KB of substantive arch docs (architecture.md alone = 24KB). Backend opened real Gitea PR #1 in karios-migration with items A-E in Go. Devops emitted `[PROD-DEPLOYED]` autonomously — first time in 6 meta-loops. v11 closed all 6 phases.
 
+## v7.7 / v7.8 (2026-04-19 night → 2026-04-20 dawn) — Telegram bidirectional + proper PTY watchdog + progress probe + first real audit PR
+- **Bidirectional Telegram via custom hitl-listener**: free text auto-dispatches as `[REQUIREMENT]`; `/ask <q>` → fast deterministic status; `/ask-deep <q>` → orchestrator-profile Hermes round-trip with full context (state.json + dispatcher logs + iteration-tracker + critiques + heartbeats)
+- **Bot ownership root cause**: `/setprivacy` in BotFather only works for bots YOU own. Original `Migrator_hermes_bot` belonged to someone else → couldn't disable Privacy → bot couldn't read channel posts. Fix: created `hermes_106_bot` (token swap) + new `Hemes_106` channel (-1003981473251), added bot as admin
+- **Hermes gateway is DM-only** — channel posts not routed; switched to custom listener for the Hemes_106 channel
+- **Proper PTY watchdog (v7.8)**: v7.6 bug killed agent-worker itself (`os.killpg(os.getpgid(master_fd), SIGTERM)` where `master_fd` is a file descriptor → returned the calling process's own PGID). v7.7 downgraded to log-only after that regression. v7.8 fixes properly: spawn Hermes with `start_new_session=True`, share PID via mutable list with stream_reader, kill only Hermes PGID
+- **Progress probe** in dispatcher main loop: walks active_gaps, computes iteration-tracker bytes, alerts at 8 min stall, kills+retries at 16 min stall via `pgrep` + SIGTERM
+- **Filter fixes**: `/status`, `/ask`, and `check_stalled_gaps` now filter out gaps with `state ∈ {completed, closed, cancelled, escalated}` (was flooding 531 STALLED nudges for ARCH-IT-016 over 9 hours)
+- **`kairos-pipeline-operations` Hermes skill** published to GitHub + installed via `hermes skills tap add` + `install` — all 9 agents have authoritative reference, updateable via `hermes skills update`
+- **Real production deliverable**: VMware audit gap (REQ-VMWARE-AUDIT-001) cycled all 6 phases. Backend autonomously shipped PR `backend/REQ-VMWARE-AUDIT-001-2026-04-20` to gitea with **305 lines added, 36 deleted, 8 files, 2 unit tests** fixing 6 P0/P1 VMware bugs the architect identified (boot_mode value, root_disk_controller persistence, snapshot moref deletion, RDM distinction, guest IP detection, zone UEFI capability warning) + bonus API route prefix fix
+
 ## Honest grade
 
-**~9.5/10 as of 2026-04-19 night.** The remaining 0.5: a real BG-stub-no-op end-to-end run with zero synthesis would prove production-readiness; v12+ will validate.
+**~9.7/10 as of 2026-04-20 dawn.** v7.7+v7.8 closed the bidirectional-Telegram gap and the PTY-watchdog regression. Remaining: hard tool-use enforcement (Hermes provider patch), BG-stub-no-op self-test, and the periodic prose-only Phase 4/5 cycles where synthesis at gates is still needed.

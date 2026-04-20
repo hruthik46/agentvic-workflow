@@ -1,0 +1,18 @@
+{
+  "parent_gap": "REQ-VMWARE-AUDIT-001",
+  "parent_trace": "trace_vmware_review_inject",
+  "sub_tasks": [
+    {
+      "id": "REQ-VMWARE-AUDIT-001_backend",
+      "agent": "backend",
+      "scope": "backend_only",
+      "parent_trace": "trace_vmware_review_inject"
+    },
+    {
+      "id": "REQ-VMWARE-AUDIT-001_frontend",
+      "agent": "frontend",
+      "scope": "frontend_only",
+      "parent_trace": "trace_vmware_review_inject"
+    }
+  ]
+}

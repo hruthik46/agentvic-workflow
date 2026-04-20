@@ -633,7 +633,8 @@ Start working immediately. Do not ask for confirmation."""
 
 def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                   tool_use_events: list, tool_use_detected: threading.Event,
-                  kill_event: threading.Event) -> None:
+                  kill_event: threading.Event,
+                  hermes_pid_holder: list = None) -> None:
     """
     Background thread that reads PTY master fd, counts tokens, detects tool_use.
     Calls os.killpg(SIGTERM) if >4000 tokens with 0 tool_use events.
@@ -658,14 +659,17 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                 tool_use_events[0] += 1
                 tool_use_detected.set()
 
-            # Watchdog: >4000 tokens, no tool_use event
-            if token_count[0] > 4000 and not tool_use_detected.is_set() and not kill_event.is_set():
-                pid = os.getpgid(master_fd)
-                try:
-                    os.killpg(pid, signal.SIGTERM)
-                    print(f"[{AGENT}] WATCHDOG: SIGTERM after {token_count[0]:.0f} tokens, 0 tool_use events")
-                except Exception as e:
-                    print(f"[{AGENT}] WATCHDOG kill failed: {e}")
+            # v7.8: PROPER kill — Hermes is in its own session (start_new_session=True),
+            # so its PGID == its PID. We kill ONLY Hermes, not agent-worker.
+            if token_count[0] > 6000 and not tool_use_detected.is_set() and not kill_event.is_set():
+                hpid = hermes_pid_holder[0] if hermes_pid_holder else None
+                if hpid:
+                    try:
+                        # SIGTERM the Hermes process group (its own session = its own PGID)
+                        os.killpg(os.getpgid(hpid), signal.SIGTERM)
+                        print(f"[{AGENT}] WATCHDOG: SIGTERM Hermes pid={hpid} after {token_count[0]:.0f} chars, 0 tool_use events")
+                    except (ProcessLookupError, PermissionError) as ke:
+                        print(f"[{AGENT}] WATCHDOG: kill failed (race with exit?): {ke}")
                 kill_event.set()
                 break
         else:
@@ -747,6 +751,7 @@ Start working immediately. Do not ask for confirmation."""
     token_count = [0.0]
     tool_use_detected = threading.Event()
     kill_event = threading.Event()
+    hermes_pid_holder = [None]  # v7.8: shared with stream_reader for proper kill
 
     try:
         master_fd, slave_fd = pty.openpty()
@@ -762,13 +767,15 @@ Start working immediately. Do not ask for confirmation."""
          "--toolsets", "terminal,file,web",
          "-v"],
         stdout=slave_fd, stderr=slave_fd,
-        cwd="/root"
+        cwd="/root",
+        start_new_session=True  # v7.8: Hermes gets its own session/PGID so we can kill it without killing ourselves
     )
     os.close(slave_fd)
+    hermes_pid_holder[0] = pid.pid  # v7.8: share Hermes PID with watchdog thread
 
     reader_thread = threading.Thread(
         target=stream_reader,
-        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event)
+        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event, hermes_pid_holder)
     )
     reader_thread.start()
 
@@ -776,7 +783,10 @@ Start working immediately. Do not ask for confirmation."""
     try:
         exit_code = pid.wait(timeout=1800)
     except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(pid.pid), _signal.SIGKILL)
+        try:
+            os.killpg(os.getpgid(pid.pid), _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
         exit_code = -_signal.SIGKILL.value
 
     reader_thread.join(timeout=5)
