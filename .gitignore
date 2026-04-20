@@ -1,0 +1,42 @@
+# Secrets — never commit
+*.env
+secrets.env
+**/api_key
+**/*.key
+**/*.pem
+*.p12
+
+# Local-only temporary files
+*.tmp
+*.swp
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+
+# Hermes session detritus (per-agent SQLite + working state)
+**/state.db
+**/state.db-shm
+**/state.db-wal
+**/sessions/
+**/sandboxes/
+**/workspace/
+**/cache/
+**/auth.lock
+
+# Session-flush briefs (ephemeral; clutters history)
+session_brief_pre_flush_*
+
+# Large local Go module cache that may have been pulled accidentally
+**/pkg/mod/
+**/go/pkg/
+
+# Live state.json — every node has its own
+pipeline/orchestrator/state.json.live
+
+# Quarantine + schema-violations dirs (per-deploy)
+**/quarantine/
+**/schema-violations/
+
+# Heartbeat files (per-second writes)
+**/heartbeat/

@@ -1,0 +1,24 @@
+[Unit]
+Description=Karios Code-Blind-Tester (Phase 4 adversarial E2E)
+After=network.target redis.service karios-orchestrator-sub.service
+Wants=redis.service
+PartOf=karios.target
+
+[Service]
+Environment=KARIOS_HITL_DISABLE_LISTENER=1
+EnvironmentFile=-/etc/karios/secrets.env
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+User=root
+EnvironmentFile=/etc/karios/secrets.env
+Environment=HERMES_AGENT=code-blind-tester
+ExecStart=/usr/local/bin/agent-worker code-blind-tester
+ExecStartPost=/bin/sh -c 'date +%%s > /var/lib/karios/heartbeat/code-blind-tester.beat'
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=karios-code-blind-tester
+
+[Install]
+WantedBy=multi-user.target

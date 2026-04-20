@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+karios-flush-decide — decide whether to start a fresh Hermes session for an agent.
+
+Invocation (from agent-worker before each run_hermes call):
+    karios-flush-decide <agent> <task_id> [--tokens N] [--tool-calls N]
+Exit codes:
+    0 = continue existing session
+    1 = flush + start fresh
+    2 = summarize-and-restart (orchestrator only)
+
+Reads policy from /etc/karios/flush-policy.yaml.
+Tracks session state at /var/lib/karios/sessions/{agent}.json.
+"""
+import os
+import sys
+import json
+import time
+import uuid
+import argparse
+from pathlib import Path
+
+POLICY_FILE = Path(os.environ.get("KARIOS_FLUSH_POLICY", "/etc/karios/flush-policy.yaml"))
+SESS_DIR = Path(os.environ.get("KARIOS_SESS_DIR", "/var/lib/karios/sessions"))
+
+
+def load_policy():
+    if not POLICY_FILE.exists():
+        return {"defaults": {"max_tokens": 50000, "max_tool_calls": 30,
+                              "max_idle_seconds": 1800, "max_wall_minutes": 120},
+                "agents": {}}
+    try:
+        import yaml
+        return yaml.safe_load(POLICY_FILE.read_text())
+    except ImportError:
+        # Fallback: skip file, use defaults
+        return {"defaults": {"max_tokens": 50000, "max_tool_calls": 30,
+                              "max_idle_seconds": 1800, "max_wall_minutes": 120},
+                "agents": {}}
+
+
+def load_session(agent):
+    f = SESS_DIR / f"{agent}.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return None
+
+
+def save_session(agent, sess):
+    SESS_DIR.mkdir(parents=True, exist_ok=True)
+    (SESS_DIR / f"{agent}.json").write_text(json.dumps(sess, indent=2))
+
+
+def decide(agent, task_id, tokens=0, tool_calls=0):
+    """Returns (action, reason) where action is 'continue' | 'flush' | 'summarize'."""
+    policy = load_policy()
+    defaults = policy.get("defaults", {})
+    agent_cfg = policy.get("agents", {}).get(agent, {})
+
+    # Strategy override
+    strategy = agent_cfg.get("strategy")
+    if strategy == "always_fresh":
+        return "flush", f"agent {agent}: always_fresh policy"
+    if strategy == "summarize_and_restart":
+        sess = load_session(agent)
+        if sess and (tokens or sess.get("tokens_used", 0)) > agent_cfg.get("summarize_at_tokens", 50000):
+            return "summarize", f"agent {agent}: tokens {sess.get('tokens_used', 0)} > summarize threshold"
+
+    sess = load_session(agent)
+    if not sess:
+        return "flush", "no existing session"
+
+    now = int(time.time())
+    age_idle = now - int(sess.get("last_used", now))
+    age_wall = now - int(sess.get("started_at", now))
+
+    if age_idle > defaults.get("max_idle_seconds", 1800):
+        return "flush", f"idle {age_idle}s > {defaults.get('max_idle_seconds')}s"
+    if age_wall / 60 > defaults.get("max_wall_minutes", 120):
+        return "flush", f"wall {age_wall // 60}m > {defaults.get('max_wall_minutes')}m"
+
+    total_tokens = sess.get("tokens_used", 0) + tokens
+    if total_tokens > defaults.get("max_tokens", 50000):
+        return "flush", f"tokens {total_tokens} > {defaults.get('max_tokens')}"
+
+    total_calls = sess.get("tool_calls", 0) + tool_calls
+    if total_calls > defaults.get("max_tool_calls", 30):
+        return "flush", f"tool_calls {total_calls} > {defaults.get('max_tool_calls')}"
+
+    if agent_cfg.get("flush_on_task_boundary") and sess.get("task_id") and sess["task_id"] != task_id:
+        return "flush", f"task boundary: {sess.get('task_id')} -> {task_id}"
+
+    return "continue", "all thresholds within bounds"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("agent")
+    ap.add_argument("task_id")
+    ap.add_argument("--tokens", type=int, default=0)
+    ap.add_argument("--tool-calls", type=int, default=0)
+    ap.add_argument("--commit-session-id", help="Save this session id after deciding 'continue' or post-flush")
+    args = ap.parse_args()
+
+    action, reason = decide(args.agent, args.task_id, args.tokens, args.tool_calls)
+    print(f"agent={args.agent} task={args.task_id} action={action} reason={reason}")
+
+    if args.commit_session_id:
+        sess = load_session(args.agent) if action == "continue" else None
+        if action != "continue":
+            sess = {"started_at": int(time.time()), "tokens_used": 0, "tool_calls": 0}
+        sess["session_id"] = args.commit_session_id
+        sess["last_used"] = int(time.time())
+        sess["task_id"] = args.task_id
+        sess["tokens_used"] = sess.get("tokens_used", 0) + args.tokens
+        sess["tool_calls"] = sess.get("tool_calls", 0) + args.tool_calls
+        save_session(args.agent, sess)
+
+    if action == "continue":
+        sys.exit(0)
+    if action == "summarize":
+        sys.exit(2)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

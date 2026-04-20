@@ -1,0 +1,24 @@
+[Unit]
+Description=Karios Tester Agent
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Environment=KARIOS_HITL_DISABLE_LISTENER=1
+EnvironmentFile=-/etc/karios/secrets.env
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/usr/bin/python3 /usr/local/bin/agent-worker tester
+ExecStartPost=/usr/local/bin/agent-heartbeat.py tester
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=REDIS_HOST=192.168.118.202
+Environment=REDIS_PORT=6379
+Environment=HERMES_AGENT=tester
+
+[Install]
+WantedBy=multi-user.target

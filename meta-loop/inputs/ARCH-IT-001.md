@@ -1,0 +1,3 @@
+# Requirement: ARCH-IT-001
+
+BG-06: Wave Orchestration — Design and implement batch/wave execution for VM migration. The migration pipeline needs to execute VMs in controlled waves (batch size, concurrency, dependency ordering) rather than all-at-once. Must support: (1) configurable wave size per batch, (2) parallel VM execution within a wave, (3) sequential wave progression, (4) pause/resume between waves, (5) rollback of a failed wave, (6) wave state persistence across orchestrator restarts. CloudStack async job queuing is the backend mechanism. Priority: HIGH. Wave: 2. Blocks: FG-02, FG-06, FG-08.

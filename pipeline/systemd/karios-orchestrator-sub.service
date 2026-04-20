@@ -1,0 +1,25 @@
+[Unit]
+Description=Karios Orchestrator Event Dispatcher
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Environment=KARIOS_HITL_DISABLE_LISTENER=1
+Type=simple
+User=root
+WorkingDirectory=/var/lib/karios/orchestrator
+ExecStart=/usr/bin/python3 /var/lib/karios/orchestrator/event_dispatcher.py
+ExecStartPost=/bin/sh -c 'date +%%s > /var/lib/karios/heartbeat/orchestrator.beat'
+# v6.0 FIX 2026-04-19: was '\%s' which systemd parses as unknown escape and ignores;
+# %%s is the correct way to pass a literal %s through systemd's specifier parser.
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=REDIS_HOST=192.168.118.202
+Environment=REDIS_PORT=6379
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/karios/secrets.env
+
+[Install]
+WantedBy=multi-user.target

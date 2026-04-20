@@ -1,0 +1,1 @@
+[ARCH-COMPLETE] ARCH-IT-ARCH-v10 iteration 1 — Phase 2 architecture complete. 5 docs at /var/lib/karios/iteration-tracker/ARCH-IT-ARCH-v10/phase-2-architecture/iteration-1/. HARD SIZE GATE passed. Ready for blind review.

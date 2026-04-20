@@ -1,0 +1,14 @@
+{
+  "rating": 1,
+  "critical_issues": [],
+  "test_results": {},
+  "dimensions": {},
+  "adversarial_tests": {
+    "run": 10,
+    "failed": 10
+  },
+  "recommendation": "REJECT",
+  "tester": "code-blind-tester",
+  "timestamp": "2026-04-19T17:59:14Z",
+  "trace_id": "trace_ARCH_IT_ARCH_v9_test_e2e_iter1_3080c870"
+}

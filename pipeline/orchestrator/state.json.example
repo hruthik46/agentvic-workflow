@@ -1,0 +1,145 @@
+{
+  "gap_counter": 1,
+  "active_gaps": {
+    "ARCH-IT-ARCH-v9": {
+      "state": "completed",
+      "phase": "completed",
+      "iteration": 1,
+      "trace_id": "trace_ARCH-IT-ARCH-v9_v6_1776618349",
+      "created_at": "2026-04-19T17:05:49.952427+00:00",
+      "meta": {
+        "tier": "T1",
+        "iter_n": 5,
+        "golden_tag": "karios-v6-iter-5-pre",
+        "stop_conditions": {
+          "max_iterations": 10,
+          "plateau_delta": 0.3,
+          "token_budget": 5000000
+        }
+      }
+    },
+    "ARCH-IT-ARCH-v10": {
+      "state": "completed",
+      "phase": "completed",
+      "iteration": 1,
+      "trace_id": "trace_ARCH-IT-ARCH-v10_v6_1776621333",
+      "created_at": "2026-04-19T17:55:33.985307+00:00",
+      "meta": {
+        "tier": "T1",
+        "iter_n": 6,
+        "golden_tag": "karios-v6-iter-6-pre",
+        "stop_conditions": {
+          "max_iterations": 10,
+          "plateau_delta": 0.3,
+          "token_budget": 5000000
+        }
+      }
+    },
+    "ARCH-IT-ARCH-v11": {
+      "state": "completed",
+      "phase": "completed",
+      "iteration": 1,
+      "trace_id": "trace_v11_review_inject",
+      "requirement_file": "ARCH-IT-ARCH-v11.md"
+    }
+  },
+  "pending_stalled": {},
+  "completed_gaps": [
+    "ARCH-IT-ARCH-v6 iteration 1",
+    {
+      "gap_id": "ARCH-IT-ARCH-v6",
+      "completed_at": "2026-04-19T09:00:53Z",
+      "result": "Meta-loop completed all 6 phases. v7.0 staged at .105:/var/lib/karios-migration/staging/v7.0",
+      "original_corrupted_key": "ARCH-IT-ARCH-v6 \u2014 confirmed alignment"
+    },
+    {
+      "gap_id": "ARCH-IT-ARCH",
+      "completed_at": "2026-04-19T15:50:00Z",
+      "result": "Stale gap from earlier session, marked complete to silence STALLED nudges",
+      "original_state": {
+        "phase": "phase-4-testing-complete",
+        "iteration": 1,
+        "trace_id": "trace_ARCH_IT_ARCH_v4_51395611",
+        "last_msg_at": null,
+        "nudge_count": 0,
+        "state": "active"
+      }
+    },
+    "ARCH-IT-ARCH-v7 iteration 1",
+    {
+      "gap_id": "ARCH-IT-ARCH-v7",
+      "completed_at": "2026-04-19T17:04:00Z",
+      "original_state": {
+        "state": "active",
+        "phase": "phase-2-arch-loop",
+        "iteration": 1,
+        "trace_id": "trace_ARCH-IT-ARCH-v7_v6_1776612821",
+        "created_at": "2026-04-19T15:33:41.541013+00:00",
+        "meta": {
+          "tier": "T1",
+          "iter_n": 3,
+          "golden_tag": "karios-v6-iter-3-pre",
+          "stop_conditions": {
+            "max_iterations": 10,
+            "plateau_delta": 0.3,
+            "token_budget": 5000000
+          }
+        }
+      }
+    },
+    {
+      "gap_id": "ARCH-IT-ARCH-v8",
+      "completed_at": "2026-04-19T17:04:00Z",
+      "original_state": {
+        "state": "active",
+        "phase": "phase-2-arch-loop",
+        "iteration": 1,
+        "trace_id": "trace_ARCH-IT-ARCH-v8_v6_1776616420",
+        "created_at": "2026-04-19T16:33:40.991069+00:00",
+        "meta": {
+          "tier": "T1",
+          "iter_n": 4,
+          "golden_tag": "karios-v6-iter-4-pre",
+          "stop_conditions": {
+            "max_iterations": 10,
+            "plateau_delta": 0.3,
+            "token_budget": 5000000
+          }
+        }
+      }
+    },
+    "ARCH-IT-ARCH-v9",
+    "ARCH-IT-ARCH-v9 \u2014 v7.3 deployed. 3 bugs fixed (IndexError, TypeError, ValueError). Orchestrator ACTIVE. API /readyz OK. All 9 agents heartbeat fresh. trace_id=trace_ARCH-IT-ARCH-v9_v7.3",
+    "ARCH-IT-ARCH-v9",
+    "ARCH-IT-ARCH-v10",
+    "ARCH-IT-ARCH-v11"
+  ],
+  "orchestrator_phase": "phase-1-dispatch",
+  "monitor_agent": {
+    "incidents": [
+      {
+        "id": "inc_20260419032604",
+        "agent": "orchestrator",
+        "status": "DOWN (last beat 1778s ago)",
+        "is_critical": true,
+        "timestamp": "2026-04-19T06:34:37.765629+00:00",
+        "type": "agent_down",
+        "resolved": "2026-04-19T06:40:40.815861+00:00"
+      },
+      {
+        "id": "inc_trace_moni_8c445f52",
+        "agent": "orchestrator",
+        "trace_id": "trace_moni_8c445f52",
+        "gap_id": "none",
+        "status": "DOWN (corrupt beat file) - confirmed via health check",
+        "is_critical": true,
+        "timestamp": "2026-04-19T03:27:07.198883+00:00",
+        "type": "agent_down",
+        "details": "orchestrator.beat contains 'orchestrator.service' instead of timestamp",
+        "telegram_alert_sent": true,
+        "resolved": "2026-04-19T06:40:40.815868+00:00"
+      }
+    ],
+    "last_health_check": "2026-04-19T06:34:37.765637+00:00"
+  }
+}

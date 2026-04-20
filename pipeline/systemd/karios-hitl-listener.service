@@ -1,0 +1,21 @@
+[Unit]
+Description=Karios HITL Listener (single Telegram long-poll for the cluster)
+After=network.target redis.service
+Wants=redis.service
+PartOf=karios.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/karios/secrets.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /usr/local/bin/karios-hitl-listener
+ExecStartPost=/bin/sh -c 'date +%%s > /var/lib/karios/heartbeat/hitl-listener.beat'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=karios-hitl-listener
+
+[Install]
+WantedBy=multi-user.target

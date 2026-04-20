@@ -1,0 +1,19 @@
+[Unit]
+Description=KAIROS A2A Protocol Server (Agent-to-Agent JSON-RPC 2.0)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/bin/python3 /usr/local/bin/a2a_protocol.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=A2A_PORT=8093
+Environment=KARIOS_A2A_TOKEN=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+karios-dlq — Dead Letter Queue management CLI for Karios v7.0
+
+Usage:
+  karios-dlq list [--agent <agent>] [--limit 50]
+  karios-dlq replay --agent <agent> --message-id <id> [--verify] [--force]
+  karios-dlq stats [--agent <agent>]
+  karios-dlq trim --agent <agent> --keep <count>
+  karios-dlq force-replay --idempotency-key <key> --agent <agent>
+"""
+
+import sys
+import json
+import redis
+import argparse
+import hashlib
+from datetime import datetime
+
+REDIS_HOST = "192.168.118.202"
+REDIS_PORT = 6379
+IDEM_PREFIX = "idem"
+DLQ_PREFIX = "stream:dlq"
+
+def redis_conn():
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+
+def current_ts():
+    return int(datetime.now().timestamp())
+
+def parse_entry(entry_id, data):
+    """Parse a DLQ stream entry into a dict."""
+    result = {"id": entry_id.decode() if isinstance(entry_id, bytes) else entry_id}
+    for k, v in data.items():
+        key = k.decode() if isinstance(k, bytes) else k
+        val = v.decode() if isinstance(v, bytes) else v
+        result[key] = val
+    return result
+
+def cmd_list(args):
+    r = redis_conn()
+    agents = [args.agent] if args.agent else ["orchestrator","architect","backend","frontend","devops","tester","monitor","architect-blind-tester","code-blind-tester"]
+    limit = args.limit or 50
+    
+    print(f"{'AGENT':<20} {'GAP_ID':<15} {'STEP_ID':<25} {'RETRY':<5} {'LAST_ERROR':<40} {'AGE'}")
+    print("-" * 120)
+    
+    for agent in agents:
+        dlq_key = f"{DLQ_PREFIX}:{agent}"
+        try:
+            entries = r.xrange(dlq_key, count=limit)
+            for entry_id, data in entries:
+                e = parse_entry(entry_id, data)
+                age = current_ts() - int(e.get("first_seen", 0))
+                age_str = f"{age}s" if age < 60 else f"{age//60}m"
+                error = (e.get("error", "") or "")[:38]
+                print(f"{agent:<20} {e.get('gap_id',''):<15} {e.get('step_id','')[:24]:<25} {e.get('retry_count',''):<5} {error:<40} {age_str}")
+        except Exception as ex:
+            print(f"Error reading {dlq_key}: {ex}")
+
+def cmd_replay(args):
+    r = redis_conn()
+    dlq_key = f"{DLQ_PREFIX}:{args.agent}"
+    
+    # Find entry by ID
+    entries = r.xrange(dlq_key, count=1000)
+    target_entry = None
+    for entry_id, data in entries:
+        e = parse_entry(entry_id, data)
+        if e["id"] == args.message_id:
+            target_entry = e
+            break
+    
+    if not target_entry:
+        print(f"DLQ entry not found: {args.message_id}")
+        sys.exit(1)
+    
+    # Verify gap still exists
+    if args.verify and not args.force:
+        # Check gap in state.json
+        import os
+        state_path = "/var/lib/karios/coordination/state.json"
+        if os.path.exists(state_path):
+            import json
+            state = json.load(open(state_path))
+            gap_id = target_entry.get("gap_id", "")
+            active = state.get("active_gaps", {})
+            if gap_id not in active:
+                print(f"Gap {gap_id} no longer active. Use --force to override.")
+                sys.exit(2)
+    
+    # Reset retry_count
+    target_entry["retry_count"] = "0"
+    target_entry["last_attempt"] = str(current_ts())
+    target_entry["error"] = ""
+    
+    # Compute new idempotency key (same id, same agent, same step = same key)
+    # But since we're replaying, the original key was deleted when DLQ entry was created
+    # So we create a fresh dispatch
+    stream_key = f"stream:{args.agent}"
+    
+    # Build stream entry
+    stream_entry = {
+        "version": "v7",
+        "id": target_entry["id"],
+        "idempotency_key": target_entry.get("idempotency_key", ""),
+        "agent_id": args.agent,
+        "step_id": target_entry.get("step_id", ""),
+        "gap_id": target_entry.get("gap_id", ""),
+        "trace_id": target_entry.get("trace_id", ""),
+        "retry_count": "0",
+        "max_retries": target_entry.get("max_retries", "3"),
+        "first_seen": target_entry.get("first_seen", str(current_ts())),
+        "last_attempt": str(current_ts()),
+        "error": "",
+        "msg_type": target_entry.get("msg_type", "DISPATCH"),
+        "payload": target_entry.get("payload", "{}")
+    }
+    
+    # Re-claim idempotency key
+    idem_key = f"idem:{args.agent}:{stream_entry['idempotency_key']}"
+    claimed = r.set(idem_key, "1", nx=True, ex=86400)
+    if not claimed:
+        print(f"Idempotency key conflict — message already dispatched.")
+        sys.exit(3)
+    
+    # Dispatch
+    r.xadd(stream_key, stream_entry)
+    
+    # Remove from DLQ
+    r.xdel(dlq_key, args.message_id)
+    
+    print(f"DLQ_REPLAY: {target_entry['gap_id']}/{target_entry['step_id']} re-dispatched")
+
+def cmd_stats(args):
+    r = redis_conn()
+    agents = [args.agent] if args.agent else ["orchestrator","architect","backend","frontend","devops","tester","monitor"]
+    
+    total = 0
+    for agent in agents:
+        dlq_key = f"{DLQ_PREFIX}:{agent}"
+        try:
+            depth = r.xlen(dlq_key)
+            total += depth
+            oldest = ""
+            if depth > 0:
+                entries = r.xrange(dlq_key, count=1)
+                if entries:
+                    _, data = entries[0]
+                    e = parse_entry(*entries[0])
+                    age = current_ts() - int(e.get("first_seen", 0))
+                    oldest = f"oldest: {age}s"
+            print(f"  {agent}: {depth} messages ({oldest})")
+        except Exception as ex:
+            print(f"  {agent}: error — {ex}")
+    
+    print(f"  Total: {total} messages")
+
+def cmd_trim(args):
+    r = redis_conn()
+    dlq_key = f"{DLQ_PREFIX}:{args.agent}"
+    r.xtrim(dlq_key, "MAXLEN", "~", args.keep)
+    print(f"Trimmed {args.agent} DLQ to ~{args.keep} entries")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="karios-dlq — DLQ management")
+    sub = parser.add_subparsers()
+    
+    list_cmd = sub.add_parser("list")
+    list_cmd.add_argument("--agent")
+    list_cmd.add_argument("--limit", type=int, default=50)
+    list_cmd.set_defaults(func=cmd_list)
+    
+    replay_cmd = sub.add_parser("replay")
+    replay_cmd.add_argument("--agent", required=True)
+    replay_cmd.add_argument("--message-id", required=True)
+    replay_cmd.add_argument("--verify", action="store_true")
+    replay_cmd.add_argument("--force", action="store_true")
+    replay_cmd.set_defaults(func=cmd_replay)
+    
+    stats_cmd = sub.add_parser("stats")
+    stats_cmd.add_argument("--agent")
+    stats_cmd.set_defaults(func=cmd_stats)
+    
+    trim_cmd = sub.add_parser("trim")
+    trim_cmd.add_argument("--agent", required=True)
+    trim_cmd.add_argument("--keep", type=int, required=True)
+    trim_cmd.set_defaults(func=cmd_trim)
+    
+    args = parser.parse_args()
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        parser.print_help()

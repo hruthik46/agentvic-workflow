@@ -1,0 +1,8 @@
+model:
+  base_url: https://api.minimax.io/v1
+  default: MiniMax-M2.7
+  provider: custom
+providers:
+  custom:
+    api_key: <REDACTED — set via env or secrets>
+    base_url: https://api.minimax.io/v1

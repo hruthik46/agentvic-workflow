@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""
+agent-stream-progress — Stream progress from agent to monitor for Telegram.
+
+Usage:
+  agent-stream-progress <trace_id> <message> [--gap-id <gap_id>] [--detail <json>]
+
+Example:
+  agent-stream-progress trace_arc_001 "Researching CPU morphing..." --gap-id ARCH-IT-001
+"""
+import sys, json, os
+from datetime import datetime
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "192.168.118.202")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+AGENT = os.environ.get("HERMES_AGENT", "unknown")
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: agent-stream-progress <trace_id> <message> [--gap-id <gap_id>] [--detail <json>]")
+        sys.exit(1)
+
+    trace_id = sys.argv[1]
+    message = sys.argv[2]
+    gap_id = None
+    detail = None
+
+    i = 3
+    while i < len(sys.argv):
+        if sys.argv[i] == "--gap-id" and i + 1 < len(sys.argv):
+            gap_id = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == "--detail" and i + 1 < len(sys.argv):
+            try:
+                detail = json.loads(sys.argv[i + 1])
+            except json.JSONDecodeError:
+                detail = sys.argv[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    import redis
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        payload = {
+            "event_type": "progress",
+            "agent": AGENT,
+            "trace_id": trace_id,
+            "gap_id": gap_id,
+            "message": message,
+            "detail": detail,
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        r.publish("agent.stream", json.dumps(payload))
+        print(f"[{AGENT}] Streamed: {message[:80]} (trace={trace_id})")
+    except Exception as e:
+        print(f"[{AGENT}] Stream error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

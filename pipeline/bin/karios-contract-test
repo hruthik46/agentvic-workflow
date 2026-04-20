@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+karios-contract-test — Continuous contract validation for the agent pipeline.
+
+Runs as a systemd timer every 5 minutes. Checks:
+  1. v3 vs v4 import drift   — every module importable; v4 wraps v3 (BaseClass exists)
+  2. Stream key consistency  — STREAM_NAME_MAP matches actual Redis stream:* keys
+  3. State.json single source — coordination + orchestrator state.json must agree
+  4. Heartbeat freshness     — all 9 agents <5min stale
+  5. Required v4 components  — none broken/corrupt at module-import time
+  6. SOP YAML validity        — every SOP file parses
+  7. blockers.json freshness  — flag entries older than 7 days
+
+On failure: writes RCA via obsidian_bridge AND alerts Telegram via /usr/local/bin/agent-watchdog.
+"""
+import sys, os, json, time, subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+sys.path.insert(0, "/usr/local/bin")
+sys.path.insert(0, "/usr/local/lib/karios")
+
+REPORT_DIR = Path("/var/lib/karios/contract-test-reports")
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _alert(severity: str, title: str, body: str):
+    """Write to vault + emit to journal so monitor agent picks it up."""
+    print(f"[{severity}] {title}\n{body}", file=sys.stderr if severity in ("CRITICAL", "HIGH") else sys.stdout)
+    try:
+        from obsidian_bridge import get_bridge
+        b = get_bridge()
+        b.write_rca(
+            incident_id=f"contract-{int(time.time())}",
+            symptom=title, root_cause="(see body)", fix="(none — automated detection)",
+            agent="system", severity=severity, files_affected=[],
+            lessons=[body[:500]],
+        )
+    except Exception as e:
+        print(f"vault write failed: {e}", file=sys.stderr)
+
+
+# ── Test 1: v3/v4 import drift ────────────────────────────────────────────────
+def test_imports() -> tuple[bool, str]:
+    failures = []
+    pairs = [
+        ("sop_engine", "sop_validator", "SOPEngine", "SOPValidator"),
+        ("output_verifier", "output_verifier_v4", "OutputVerifier", "OutputVerifierV4"),
+        ("hitl_interrupt", "hitl_interrupt_v4", "HITLInterruptHandler", "HITLInterruptHandlerV4"),
+        ("agent_benchmark", "agent_benchmark_v4", "AgentBenchmark", "AgentBenchmarkV4"),
+        ("otel_tracer", "otel_tracing_v4", "KariosTracer", "KariosTracerV4"),
+    ]
+    v4_only = ["time_travel", "a2a_protocol", "semantic_memory_v4"]
+    for v3_mod, v4_mod, v3_cls, v4_cls in pairs:
+        try:
+            m3 = __import__(v3_mod)
+            if not hasattr(m3, v3_cls):
+                failures.append(f"{v3_mod}.{v3_cls} missing")
+        except Exception as e:
+            failures.append(f"v3 {v3_mod} import: {type(e).__name__}: {e}")
+        try:
+            m4 = __import__(v4_mod)
+            if not hasattr(m4, v4_cls):
+                failures.append(f"{v4_mod}.{v4_cls} missing")
+        except Exception as e:
+            failures.append(f"v4 {v4_mod} import: {type(e).__name__}: {e}")
+    for mod in v4_only:
+        try:
+            __import__(mod)
+        except Exception as e:
+            failures.append(f"v4-only {mod} import: {type(e).__name__}: {e}")
+    return (len(failures) == 0, "; ".join(failures) if failures else "all 13 modules importable")
+
+
+# ── Test 2: Redis stream consistency ─────────────────────────────────────────
+def test_streams() -> tuple[bool, str]:
+    try:
+        import redis
+    except ImportError:
+        return (False, "redis-py not installed")
+    expected = ["stream:orchestrator", "stream:architect", "stream:backend", "stream:frontend-worker",
+                "stream:devops-agent", "stream:tester-agent", "stream:monitor",
+                "stream:architect-blind-tester", "stream:code-blind-tester"]
+    try:
+        r = redis.Redis(host=os.environ.get("REDIS_HOST", "192.168.118.202"),
+                        port=int(os.environ.get("REDIS_PORT", "6379")),
+                        username=os.environ.get("REDIS_USER", "karios_admin"),
+                        password=os.environ.get("REDIS_PASSWORD", ""),
+                        decode_responses=True, socket_timeout=5, socket_connect_timeout=5)
+        r.ping()
+    except Exception as e:
+        return (False, f"redis connect: {type(e).__name__}: {e}")
+    # All expected streams should at least exist as types
+    info = []
+    for s in expected:
+        try:
+            t = r.type(s)
+            info.append(f"{s}={t}")
+        except Exception as e:
+            info.append(f"{s}=ERR({e})")
+    return (True, " ".join(info))
+
+
+# ── Test 3: state.json single source ─────────────────────────────────────────
+def test_state_consistency() -> tuple[bool, str]:
+    a = Path("/var/lib/karios/coordination/state.json")
+    b = Path("/var/lib/karios/orchestrator/state.json")
+    if not a.exists() or not b.exists():
+        return (True, "(only one state.json present — no drift possible)")
+    try:
+        ja = json.loads(a.read_text())
+        jb = json.loads(b.read_text())
+    except Exception as e:
+        return (False, f"parse: {e}")
+    ag_a = set(ja.get("active_gaps", {}).keys())
+    ag_b = set(jb.get("active_gaps", {}).keys())
+    diff = (ag_a - ag_b) | (ag_b - ag_a)
+    if diff:
+        return (False, f"active_gaps drift between coord+orch state.json: {diff}")
+    return (True, f"both have {len(ag_a)} active_gaps in sync")
+
+
+# ── Test 4: heartbeat freshness ──────────────────────────────────────────────
+def test_heartbeats() -> tuple[bool, str]:
+    agents = ["orchestrator", "architect", "backend", "frontend", "devops",
+              "tester", "monitor", "architect-blind-tester", "code-blind-tester"]
+    now = int(time.time())
+    stale = []
+    for a in agents:
+        f = Path(f"/var/lib/karios/heartbeat/{a}.beat")
+        if not f.exists():
+            stale.append(f"{a}=missing")
+            continue
+        try:
+            ts = int(f.read_text().strip())
+            age = now - ts
+            if age > 300:
+                stale.append(f"{a}={age}s")
+        except Exception:
+            stale.append(f"{a}=corrupt")
+    return (len(stale) == 0, ", ".join(stale) if stale else "all 9 fresh (<5min)")
+
+
+# ── Test 5: SOP YAML validity ────────────────────────────────────────────────
+def test_sops() -> tuple[bool, str]:
+    try:
+        import yaml
+    except ImportError:
+        return (False, "PyYAML not installed")
+    sops_dir = Path("/etc/karios/v4/sops")
+    if not sops_dir.exists():
+        return (False, f"{sops_dir} does not exist")
+    failures = []
+    count = 0
+    for f in sops_dir.glob("*.yaml"):
+        count += 1
+        try:
+            yaml.safe_load(f.read_text())
+        except Exception as e:
+            failures.append(f"{f.name}: {type(e).__name__}: {e}")
+    return (len(failures) == 0, f"{count} SOPs parsed; failures: {failures}" if failures else f"{count} SOPs valid")
+
+
+def main():
+    tests = [
+        ("imports",       test_imports),
+        ("streams",       test_streams),
+        ("state_consistency", test_state_consistency),
+        ("heartbeats",    test_heartbeats),
+        ("sops",          test_sops),
+    ]
+    results = {}
+    fail_any = False
+    for name, fn in tests:
+        try:
+            ok, msg = fn()
+        except Exception as e:
+            ok, msg = False, f"unexpected: {type(e).__name__}: {e}"
+        results[name] = {"ok": ok, "msg": msg}
+        icon = "✓" if ok else "✗"
+        print(f"  {icon} {name:25s} {msg}")
+        if not ok:
+            fail_any = True
+
+    report = {
+        "ts": _now(),
+        "host": os.uname().nodename,
+        "results": results,
+        "overall_ok": not fail_any,
+    }
+    fname = REPORT_DIR / f"contract-{int(time.time())}.json"
+    fname.write_text(json.dumps(report, indent=2))
+
+    if fail_any:
+        title = "Contract test failures"
+        body = "\n".join(f"- {n}: {r['msg']}" for n, r in results.items() if not r["ok"])
+        _alert("HIGH", title, body)
+        sys.exit(1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

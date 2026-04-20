@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+karios-meta-runner — Safe driver for recursive self-improvement of the pipeline.
+
+Implements the v6.0 META-SAFETY HARNESS:
+  * Trust tiers (T0=artifacts free / T1=plumbing canary / T2=meta-controllers HITL)
+  * Golden-seed git tag before every iteration
+  * Sandbox dry-run before applying T1 changes
+  * Held-out eval set drives the actual 10/10 decision
+  * Per-trace token budget cap
+  * Stop conditions: K_max, plateau, sandbox escape, anchor regression, cost cap, human STOP
+
+Usage:
+    karios-meta-runner init                        # First-time golden seed tag
+    karios-meta-runner dispatch ARCH-IT-ARCH-v6    # Push the meta-gap into the pipeline
+    karios-meta-runner stop                        # Telegram-grade STOP — halts loop
+    karios-meta-runner rollback {tag}              # Roll back to a prior iteration
+    karios-meta-runner status                      # Show iteration history + held-out scores
+"""
+import os, sys, json, time, subprocess, hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+
+KARIOS_ROOT = Path("/var/lib/karios")
+COORD = KARIOS_ROOT / "coordination"
+META_DIR = KARIOS_ROOT / "meta"
+META_LOG = META_DIR / "iterations.jsonl"
+GOLDEN_TAG_PREFIX = "karios-v6-iter"
+HELD_OUT_DIR = COORD / "held-out-eval"
+# Two state.json files exist; dispatcher reads ORCH_STATE — write to both for consistency
+STATE_FILE = COORD / "state.json"           # other tools (e.g. watchdog) read this one
+ORCH_STATE_FILE = KARIOS_ROOT / "orchestrator" / "state.json"  # dispatcher.load_state()
+REQS_DIR = COORD / "requirements"
+ARCH_DOC = Path("/opt/obsidian/config/vaults/My-LLM-Wiki/wiki/agents/orchestrator/multi-agent-architecture.md")
+
+# Stop conditions
+MAX_ITERATIONS = 10
+PLATEAU_DELTA = 0.3
+PLATEAU_WINDOW = 2
+TOKEN_BUDGET_PER_TRACE = 5_000_000   # ~$50 at Sonnet rates
+
+
+def _git(*args, cwd=KARIOS_ROOT) -> tuple[int, str]:
+    r = subprocess.run(["git", "-C", str(cwd)] + list(args), capture_output=True, text=True)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def _ensure_git():
+    """Initialize git in /var/lib/karios if missing — for golden-seed tagging."""
+    META_DIR.mkdir(parents=True, exist_ok=True)
+    HELD_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if not (KARIOS_ROOT / ".git").exists():
+        _git("init", "-b", "main")
+        _git("config", "user.email", "karios-meta@kar.ios")
+        _git("config", "user.name", "Karios Meta-Runner")
+        # Don't track everything — just orchestrator + coordination + meta + heartbeat snapshots
+        (KARIOS_ROOT / ".gitignore").write_text(
+            "# Track only meta-relevant state\n"
+            "*.log\n"
+            "logs/\n"
+            "context-bus/\n"
+            "agent-msg/\n"
+            "checkpoints/\n"
+            "backups/\n"
+            "obsidian-vault/\n"  # vault has its own sync
+            "iteration-tracker/*/phase-3-coding/\n"  # phase-3 generates lots of code
+            "*.pid\n"
+            "*.beat\n"
+        )
+        _git("add", "-A")
+        _git("commit", "-m", "karios-meta: initial seed (orchestrator + coordination)")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_log(entry: dict):
+    META_DIR.mkdir(parents=True, exist_ok=True)
+    with open(META_LOG, "a") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def _read_log() -> list[dict]:
+    if not META_LOG.exists():
+        return []
+    out = []
+    for line in META_LOG.read_text().splitlines():
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+
+def _next_iter_n() -> int:
+    history = _read_log()
+    return max([e.get("iter", 0) for e in history], default=0) + 1
+
+
+def cmd_init():
+    """One-time setup: git init + first golden tag + carve out 20% of test cases as held-out."""
+    _ensure_git()
+    rc, out = _git("tag", "-l", f"{GOLDEN_TAG_PREFIX}*")
+    if not out.strip():
+        _git("tag", "-a", f"{GOLDEN_TAG_PREFIX}-0-golden-seed", "-m", "v6.0 golden seed — first known-good")
+        print(f"Tagged golden seed: {GOLDEN_TAG_PREFIX}-0-golden-seed")
+    else:
+        print(f"Existing tags:\n{out}")
+
+    # Carve held-out — copy 20% of tests/learnings as evaluation set
+    test_cases = COORD / "test-cases.md"
+    if test_cases.exists() and not (HELD_OUT_DIR / "test-cases.md").exists():
+        # Take every 5th line (roughly 20%)
+        lines = test_cases.read_text().splitlines()
+        held = "\n".join(l for i, l in enumerate(lines) if (i % 5 == 0))
+        (HELD_OUT_DIR / "test-cases.md").write_text(
+            "# HELD-OUT eval set — never seen by architect or blind-tester\n\n" + held
+        )
+        print(f"Held-out test-cases written: {HELD_OUT_DIR / 'test-cases.md'} ({len(held.splitlines())} lines)")
+    print("Init complete.")
+
+
+def cmd_dispatch(gap_id: str, requirement_path: str = None):
+    """Push a meta-gap into the orchestrator's active_gaps. Default requirement = current arch doc."""
+    _ensure_git()
+
+    # Tag pre-iteration golden state (rollback target)
+    iter_n = _next_iter_n()
+    tag = f"{GOLDEN_TAG_PREFIX}-{iter_n}-pre"
+    _git("add", "-A")
+    _git("commit", "--allow-empty", "-m", f"karios-meta: pre-{gap_id}-iter-{iter_n}")
+    rc, out = _git("tag", "-a", tag, "-m", f"Pre-iteration {iter_n} for {gap_id}")
+    if rc != 0:
+        print(f"WARN: tag create failed: {out}")
+
+    # Write requirement
+    REQS_DIR.mkdir(parents=True, exist_ok=True)
+    req_file = REQS_DIR / f"{gap_id}.md"
+    if requirement_path:
+        req_text = Path(requirement_path).read_text()
+    elif ARCH_DOC.exists():
+        arch_body = ARCH_DOC.read_text()
+        req_text = (
+            "# META-LOOP TASK\n\n"
+            "You are improving the KAIROS multi-agent pipeline ARCHITECTURE itself.\n"
+            "The current architecture is included verbatim below. Your job: identify the\n"
+            "next-most-impactful improvement, propose it as a DELTA (not a full rewrite),\n"
+            "and produce the 5 architecture deliverables (architecture.md, edge-cases.md,\n"
+            "test-cases.md, api-contract.md, deployment-plan.md) describing the change.\n\n"
+            "META-SAFETY CONSTRAINTS — do NOT violate:\n"
+            "  T0 (free):    generated artifacts, code in karios-migration / karios-web\n"
+            "  T1 (canary):  agent prompts, dispatcher logic, packet schema\n"
+            "  T2 (HITL):    the rubric itself, blind-tester prompt, stop conditions, this safety harness\n\n"
+            "If your proposed change is T2, mark it `requires_hitl: true` and stop without applying.\n\n"
+            "Persistence: write your reasoning + critique + RCA via:\n"
+            "  /usr/local/bin/karios-vault learning|critique|rca|decision  ...\n"
+            "Every entry lands in the Obsidian vault and syncs to Sai's Mac via Relay.\n\n"
+            f"Pre-iteration golden tag (use `karios-meta-runner rollback {tag}` to revert): {tag}\n\n"
+            "---\n\n"
+            "## Current architecture (the input you are improving)\n\n"
+            + arch_body
+        )
+    else:
+        print(f"ERROR: arch doc not at {ARCH_DOC}; pass --requirement explicitly")
+        sys.exit(2)
+    req_file.write_text(req_text)
+    print(f"Requirement written: {req_file} ({len(req_text)} chars)")
+
+    # Push into both state.json files (dispatcher reads ORCH_STATE_FILE; watchdog/UI reads STATE_FILE)
+    def _load(p):
+        try:
+            return json.loads(p.read_text()) if p.exists() else {}
+        except Exception:
+            return {}
+    state_coord = _load(STATE_FILE)
+    state_orch = _load(ORCH_STATE_FILE)
+    new_entry = {
+        "state": "pending",
+        "phase": "phase-2-arch-loop",
+        "iteration": 1,
+        "trace_id": f"trace_{gap_id}_v6_{int(time.time())}",
+        "created_at": _now_iso(),
+        "meta": {
+            "tier": "T1",
+            "iter_n": iter_n,
+            "golden_tag": tag,
+            "stop_conditions": {
+                "max_iterations": MAX_ITERATIONS,
+                "plateau_delta": PLATEAU_DELTA,
+                "token_budget": TOKEN_BUDGET_PER_TRACE,
+            },
+        },
+    }
+    state_coord.setdefault("active_gaps", {})[gap_id] = new_entry
+    state_orch.setdefault("active_gaps", {})[gap_id] = new_entry
+    state_orch.setdefault("gap_counter", 0)
+    state_orch["gap_counter"] = max(state_orch["gap_counter"], state_coord.get("gap_counter", 0))
+    ORCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state_coord, indent=2))
+    ORCH_STATE_FILE.write_text(json.dumps(state_orch, indent=2))
+    print(f"Gap {gap_id} added to BOTH state.json files (coordination + orchestrator)")
+
+    # Log the iteration
+    _append_log({
+        "ts": _now_iso(), "iter": iter_n, "gap_id": gap_id, "tier": "T1",
+        "golden_tag": tag, "trigger": "manual", "status": "dispatched",
+    })
+
+    # Restart orchestrator so it picks up the new gap on its startup loop
+    subprocess.run(["systemctl", "restart", "karios-orchestrator-sub"], check=False)
+    print(f"Orchestrator restarted; will pick up {gap_id} on init.")
+    print(f"Watch:  journalctl -fu karios-orchestrator-sub")
+    print(f"Track:  ls /var/lib/karios/iteration-tracker/{gap_id}/")
+    print(f"Rollback if it goes bad:  karios-meta-runner rollback {tag}")
+
+
+def cmd_stop():
+    """Emergency STOP — set a marker file the orchestrator should respect."""
+    stop_file = COORD / "META_STOP"
+    stop_file.write_text(_now_iso())
+    print(f"Stop marker written: {stop_file}")
+    print("Orchestrator will halt the meta-loop on next state-transition check.")
+
+
+def cmd_rollback(tag: str):
+    """Roll back orchestrator + coordination to a prior golden tag."""
+    if not tag.startswith(GOLDEN_TAG_PREFIX):
+        print(f"Refusing: tag must start with {GOLDEN_TAG_PREFIX}")
+        sys.exit(2)
+    rc, out = _git("checkout", tag, "--", "orchestrator", "coordination")
+    if rc != 0:
+        print(f"Rollback failed: {out}")
+        sys.exit(rc)
+    subprocess.run(["systemctl", "restart", "karios-orchestrator-sub"], check=False)
+    print(f"Rolled back to {tag}; orchestrator restarted.")
+
+
+def cmd_status():
+    history = _read_log()
+    if not history:
+        print("No iterations yet.")
+        return
+    print(f"{'iter':>5} {'gap_id':30s} {'tier':5s} {'golden_tag':40s} status")
+    print("-" * 100)
+    for e in history[-30:]:
+        print(f"{e.get('iter', 0):5d} {e.get('gap_id', '?'):30s} {e.get('tier', '?'):5s} "
+              f"{e.get('golden_tag', '?'):40s} {e.get('status', '?')}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    cmd = sys.argv[1]
+    if cmd == "init":
+        cmd_init()
+    elif cmd == "dispatch":
+        if len(sys.argv) < 3:
+            print("Usage: karios-meta-runner dispatch <gap_id> [--requirement path/to/req.md]")
+            sys.exit(2)
+        gap_id = sys.argv[2]
+        req = None
+        if "--requirement" in sys.argv:
+            req = sys.argv[sys.argv.index("--requirement") + 1]
+        cmd_dispatch(gap_id, req)
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "rollback":
+        if len(sys.argv) < 3:
+            print("Usage: karios-meta-runner rollback <tag>")
+            sys.exit(2)
+        cmd_rollback(sys.argv[2])
+    elif cmd == "status":
+        cmd_status()
+    else:
+        print(f"Unknown command: {cmd}")
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,1 @@
+[ARCH-COMPLETE] ARCH-IT-ARCH-v10 iteration 2 — Phase 2 architecture re-submitted for blind review. 5 docs at /var/lib/karios/iteration-tracker/ARCH-IT-ARCH-v10/phase-2-architecture/iteration-1/. CRITICAL: blind-tester MUST emit JSON-FIRST output (fenced json block) with rating, critical[], blockers[]. Prior iteration emitted empty body; pipeline cannot advance without JSON.

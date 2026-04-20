@@ -1,0 +1,192 @@
+#!/bin/bash
+# karios-self-test — Pipeline self-test CLI
+# Item B of ARCH-IT-ARCH-v11: BG-stub-no-op self-test gap.
+#
+# Runs the BG-stub-no-op gap through all 6 phases and asserts boundaries fire.
+# Exit 0 = pipeline healthy. Exit 1 = failure.
+#
+# Usage:
+#   karios-self-test [--gap-id BG-stub-no-op] [--timeout 1800]
+#
+# Options:
+#   --gap-id     Gap ID to use for self-test (default: BG-stub-no-op)
+#   --timeout    Total timeout in seconds (default: 1800 = 30 minutes)
+#   --backend    Backend API URL (default: http://localhost:8080)
+#   --help       Show this help message
+
+set -euo pipefail
+
+# Defaults
+GAP_ID="BG-stub-no-op"
+TIMEOUT=1800
+BACKEND_URL="${BACKEND_URL:-http://localhost:8080}"
+RESULTS_DIR="/var/lib/karios/self-test-results"
+INBOX_DIR="/var/lib/karios/agent-msg/inbox/orchestrator"
+
+# ── CLI args ──────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gap-id)      GAP_ID="$2"; shift 2 ;;
+    --timeout)     TIMEOUT="$2"; shift 2 ;;
+    --backend)     BACKEND_URL="$2"; shift 2 ;;
+    --help|-h)     cat "$0" | grep -E "^#|^\s+--"; exit 0 ;;
+    *)             echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+log() { echo "[self-test] $(date -Iseconds) $*"; }
+
+wait_for_file() {
+  local pattern="$1"; local timeout="$2"; local label="$3"
+  for i in $(seq 1 "$timeout"); do
+    if ls "$INBOX_DIR"/${GAP_ID}*.json 2>/dev/null | xargs grep -l "$pattern" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_backend() {
+  local url="$1"; local timeout="${2:-10}"
+  for i in $(seq 1 "$timeout"); do
+    if curl -sf "$url/api/v1/stub/ok" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+emit_result() {
+  local phase="$1"; local event="$2"; local elapsed_ms="$3"
+  mkdir -p "$RESULTS_DIR"
+  echo "{\"phase\": \"$phase\", \"event\": \"$event\", \"timestamp\": \"$(date -Iseconds)\", \"elapsed_ms\": $elapsed_ms}" \
+    >> "$RESULTS_DIR/${GAP_ID}.jsonl"
+}
+
+# ── Pre-flight checks ──────────────────────────────────────────────────────────
+log "Starting pipeline self-test for gap=$GAP_ID timeout=${TIMEOUT}s"
+
+# Check backend is reachable
+if ! wait_for_backend "$BACKEND_URL" 10; then
+  log "FAIL: Backend not reachable at $BACKEND_URL/api/v1/stub/ok"
+  exit 1
+fi
+
+# Verify stub endpoint returns correct shape
+STUB_RESPONSE=$(curl -sf "$BACKEND_URL/api/v1/stub/ok")
+if ! echo "$STUB_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok') == True, 'ok != True'; assert 'timestamp' in d, 'no timestamp'" 2>/dev/null; then
+  log "FAIL: stub endpoint returned unexpected response: $STUB_RESPONSE"
+  exit 1
+fi
+log "Backend stub OK: $STUB_RESPONSE"
+
+mkdir -p "$RESULTS_DIR"
+PHASES_FIRED=0
+START_TIME=$(date +%s)
+
+# ── Phase 0 → 1: Dispatch requirement ─────────────────────────────────────────
+log "Phase 0→1: Dispatching requirement..."
+agent send orchestrator "[REQUIREMENT] ${GAP_ID}: Pipeline self-test gap"
+PHASE_START=$(date +%s)
+
+if wait_for_file "RESEARCH-COMPLETE.*${GAP_ID}" 120 "RESEARCH-COMPLETE"; then
+  PHASES_FIRED=$((PHASES_FIRED+1))
+  ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+  emit_result "0→1" "[REQUIREMENT] → [RESEARCH-COMPLETE]" "$ELAPSED"
+  log "Phase 0→1: OK (${ELAPSED}ms)"
+else
+  log "FAIL: Phase 0→1 timeout (120s)"
+  exit 1
+fi
+
+# ── Phase 1 → 2: Wait for ARCH-COMPLETE ──────────────────────────────────────
+log "Phase 1→2: Waiting for ARCH-COMPLETE..."
+PHASE_START=$(date +%s)
+
+if wait_for_file "ARCH-COMPLETE.*${GAP_ID}" 300 "ARCH-COMPLETE"; then
+  PHASES_FIRED=$((PHASES_FIRED+1))
+  ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+  emit_result "1→2" "[RESEARCH-COMPLETE] → [ARCH-COMPLETE]" "$ELAPSED"
+  log "Phase 1→2: OK (${ELAPSED}ms)"
+else
+  log "FAIL: Phase 1→2 timeout (300s)"
+  exit 1
+fi
+
+# ── Phase 2 → 3: ARCH-REVIEWED (rating ≥ 8) ──────────────────────────────────
+log "Phase 2→3: Waiting for ARCH-REVIEWED (rating ≥ 8)..."
+PHASE_START=$(date +%s)
+
+# Poll for ARCH-REVIEWED JSON with rating ≥ 8
+for i in $(seq 1 300); do
+  FOUND=$(ls "$INBOX_DIR"/${GAP_ID}*.json 2>/dev/null | xargs grep -l "ARCH-REVIEWED\|BLIND-REVIEWED" 2>/dev/null | head -1)
+  if [[ -n "$FOUND" ]]; then
+    RATING=$(python3 -c "import json; d=json.load(open('$FOUND')); print(d.get('body','')[:500])" 2>/dev/null | python3 -c "import sys,json,re; body=sys.stdin.read(); m=re.search(r'rating[\":\s]+(\d+)', body); print(int(m.group(1)) if m else 0)" 2>/dev/null || echo "0")
+    if [[ "$RATING" -ge 8 ]]; then
+      PHASES_FIRED=$((PHASES_FIRED+1))
+      ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+      emit_result "2→3" "[ARCH-COMPLETE] → [ARCH-REVIEWED rating=$RATING]" "$ELAPSED"
+      log "Phase 2→3: OK (rating=$RATING, ${ELAPSED}ms)"
+      break
+    fi
+  fi
+  sleep 1
+done
+
+if [[ "$PHASES_FIRED" -lt 3 ]]; then
+  log "FAIL: Phase 2→3 timeout or rating < 8"
+  exit 1
+fi
+
+# ── Phase 3 → 4: CODING-COMPLETE ─────────────────────────────────────────────
+log "Phase 3→4: Waiting for CODING-COMPLETE..."
+PHASE_START=$(date +%s)
+
+if wait_for_file "CODING-COMPLETE.*${GAP_ID}" 300 "CODING-COMPLETE"; then
+  PHASES_FIRED=$((PHASES_FIRED+1))
+  ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+  emit_result "3→4" "[CODING-COMPLETE]" "$ELAPSED"
+  log "Phase 3→4: OK (${ELAPSED}ms)"
+else
+  log "FAIL: Phase 3→4 timeout (300s)"
+  exit 1
+fi
+
+# ── Phase 4 → 5: DEPLOYED-STAGING ───────────────────────────────────────────
+log "Phase 4→5: Waiting for DEPLOYED-STAGING..."
+PHASE_START=$(date +%s)
+
+if wait_for_file "DEPLOYED-STAGING\|STAGING-DEPLOYED.*${GAP_ID}" 300 "STAGING-DEPLOYED"; then
+  PHASES_FIRED=$((PHASES_FIRED+1))
+  ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+  emit_result "4→5" "[DEPLOYED-STAGING]" "$ELAPSED"
+  log "Phase 4→5: OK (${ELAPSED}ms)"
+else
+  log "FAIL: Phase 4→5 timeout (300s)"
+  exit 1
+fi
+
+# ── Phase 5 → 6: DEPLOYED-PROD ──────────────────────────────────────────────
+log "Phase 5→6: Waiting for DEPLOYED-PROD..."
+PHASE_START=$(date +%s)
+
+if wait_for_file "DEPLOYED-PROD\|PROD-DEPLOYED.*${GAP_ID}" 300 "PROD-DEPLOYED"; then
+  PHASES_FIRED=$((PHASES_FIRED+1))
+  ELAPSED=$((($(date +%s) - PHASE_START) * 1000))
+  emit_result "5→6" "[DEPLOYED-PROD]" "$ELAPSED"
+  log "Phase 5→6: OK (${ELAPSED}ms)"
+else
+  log "FAIL: Phase 5→6 timeout (300s)"
+  exit 1
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+TOTAL_TIME=$(($(date +%s) - START_TIME))
+log "SUCCESS: All 6 phase boundaries fired in ${TOTAL_TIME}s"
+log "Results: $RESULTS_DIR/${GAP_ID}.jsonl"
+cat "$RESULTS_DIR/${GAP_ID}.jsonl"
+
+exit 0

@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+karios-merge-resolve — Resolve git merge conflicts using Obsidian vault knowledge.
+
+Usage:
+    karios-merge-resolve <repo_path> [<conflict_file>]
+    karios-merge-resolve --post-commit <repo_path>   # auto-pull-rebase + push
+
+Strategy:
+    1. For each conflict file, detect <<<<<<< / ======= / >>>>>>> markers
+    2. Look up vault for prior resolutions of the same file/symbol
+    3. Apply: prefer ours for pipeline-only files (matched by .gitignore patterns);
+       prefer theirs for upstream-tracking files; otherwise leave for manual.
+    4. After resolution: stage, continue rebase, push.
+
+Refuses to push files matching the agentic-workflow blacklist (per v7.4 gitignore).
+"""
+import os, sys, subprocess, json, re
+from pathlib import Path
+
+BLACKLIST_PATTERNS = [
+    r"\.hermes$", r"karios-pipeline/", r"multi-agent-architecture.*\.md$",
+    r"ARCH-IT-ARCH", r"iteration-tracker/", r"karios-meta-",
+    r"karios-flush-", r"karios-vault", r"obsidian_bridge",
+    r"\.code-review-graph/", r"agent-worker$", r"session_brief_pre_flush_",
+    r"flush-policy\.yaml$", r"\.kairos/",
+]
+
+VAULT_RAW = Path("/opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline")
+
+
+def run(cmd, cwd=None, check=True):
+    """Run a command and return stdout."""
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"cmd failed ({r.returncode}): {' '.join(cmd)}\n{r.stderr}")
+    return r.stdout.strip()
+
+
+def is_blacklisted(path: str) -> bool:
+    return any(re.search(p, path) for p in BLACKLIST_PATTERNS)
+
+
+def find_conflict_files(repo: Path):
+    out = run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False)
+    return [l for l in out.splitlines() if l.strip()]
+
+
+def resolve_one(repo: Path, conflict_file: str) -> bool:
+    """Resolve a single conflict file. Returns True if resolved."""
+    full = repo / conflict_file
+    if not full.exists():
+        print(f"  {conflict_file}: vanished, skipping")
+        return False
+    if is_blacklisted(conflict_file):
+        # File should never have been pushed — accept ours and add to .gitignore
+        print(f"  {conflict_file}: BLACKLISTED — accepting ours + .gitignoring")
+        run(["git", "checkout", "--ours", conflict_file], cwd=repo)
+        gitignore = repo / ".gitignore"
+        if gitignore.exists() and conflict_file not in gitignore.read_text():
+            with open(gitignore, "a") as f:
+                f.write(f"\n# v7.4 auto-blocked: {conflict_file}\n{conflict_file}\n")
+        return True
+    # Try vault lookup
+    sym_match = re.search(r"([A-Za-z_][A-Za-z0-9_]+)\b", conflict_file.split("/")[-1])
+    if sym_match:
+        sym = sym_match.group(1)
+        # Search vault for prior resolution
+        try:
+            sys.path.insert(0, "/usr/local/bin")
+            from obsidian_bridge import get_bridge
+            b = get_bridge()
+            hits = b.read_relevant(f"merge conflict {sym} {conflict_file}", kind="rca", limit=3)
+            if hits:
+                print(f"  {conflict_file}: vault has {len(hits)} prior RCA(s); review manually:")
+                for h in hits:
+                    print(f"    - {h['path']}")
+                return False  # Don't auto-resolve technical conflicts; let human see
+        except Exception as e:
+            print(f"  {conflict_file}: vault lookup failed: {e}")
+    print(f"  {conflict_file}: no auto-resolution; manual review required")
+    return False
+
+
+def post_commit_pull_push(repo: Path):
+    """Pull --rebase, resolve any conflicts, push. Verifies blacklist before push."""
+    branch = run(["git", "branch", "--show-current"], cwd=repo)
+    print(f"[merge-resolve] {repo.name}: branch={branch}")
+
+    # Verify nothing blacklisted is staged
+    staged = run(["git", "diff", "--cached", "--name-only"], cwd=repo, check=False).splitlines()
+    bad = [s for s in staged if is_blacklisted(s)]
+    if bad:
+        print(f"  REFUSING PUSH: blacklisted files staged: {bad}")
+        for b_ in bad:
+            run(["git", "reset", "HEAD", b_], cwd=repo, check=False)
+        return False
+
+    # Pull rebase
+    print(f"  git pull --rebase origin {branch}")
+    r = subprocess.run(["git", "pull", "--rebase", "origin", branch], cwd=repo, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"  pull --rebase failed:\n{r.stderr[:500]}")
+        # Find conflicts
+        conflicts = find_conflict_files(repo)
+        if conflicts:
+            print(f"  {len(conflicts)} conflict file(s):")
+            all_resolved = True
+            for cf in conflicts:
+                if resolve_one(repo, cf):
+                    run(["git", "add", cf], cwd=repo)
+                else:
+                    all_resolved = False
+            if all_resolved:
+                run(["git", "rebase", "--continue"], cwd=repo, check=False)
+            else:
+                print(f"  manual resolution needed; aborting rebase")
+                run(["git", "rebase", "--abort"], cwd=repo, check=False)
+                return False
+
+    # Push
+    print(f"  git push origin {branch}")
+    r = subprocess.run(["git", "push", "origin", branch], cwd=repo, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"  push failed:\n{r.stderr[:500]}")
+        return False
+    print(f"  PUSHED {repo.name}/{branch}")
+    return True
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    args = sys.argv[1:]
+    if args[0] == "--post-commit":
+        repo = Path(args[1]).resolve()
+        ok = post_commit_pull_push(repo)
+        sys.exit(0 if ok else 1)
+    # Single conflict file mode
+    repo = Path(args[0]).resolve()
+    if len(args) >= 2:
+        ok = resolve_one(repo, args[1])
+        sys.exit(0 if ok else 1)
+    # No file specified — list conflicts
+    conflicts = find_conflict_files(repo)
+    if not conflicts:
+        print(f"no conflicts in {repo}")
+        sys.exit(0)
+    print(f"{len(conflicts)} conflict(s) in {repo.name}:")
+    for cf in conflicts:
+        print(f"  {cf}")
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

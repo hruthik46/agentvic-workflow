@@ -1,0 +1,21 @@
+[Unit]
+Description=Karios A2A JSON-RPC Server (G7 — agent interoperability)
+After=network.target redis.service
+Wants=redis.service
+PartOf=karios.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/karios/secrets.env
+Environment=A2A_PORT=8090
+ExecStart=/usr/bin/python3 /usr/local/bin/a2a_protocol.py
+ExecStartPost=/bin/sh -c 'date +%%s > /var/lib/karios/heartbeat/a2a.beat'
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=karios-a2a
+
+[Install]
+WantedBy=multi-user.target

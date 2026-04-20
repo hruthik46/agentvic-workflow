@@ -1,0 +1,52 @@
+# Hermes session-flush policy for the 9-agent KAIROS pipeline
+# Version: 1.0  Date: 2026-04-19
+# Source: research summary at raw/karios-pipeline/decisions/dec-13-session-flush-policy.md
+# Loaded by: /usr/local/bin/karios-flush-decide
+
+defaults:
+  max_tokens: 50000          # quality drops past ~30-50K (NoLiMa, Lost-in-the-Middle)
+  max_tool_calls: 30         # without forward-progress event
+  max_idle_seconds: 1800     # 30 min — Anthropic prompt cache TTL = 5 min, well past
+  max_wall_minutes: 120      # absolute ceiling per session
+  loop_detection_window: 10  # same tool+args 3x in last 10 calls = looping
+  quality_plateau_delta: 0.05  # self-critique delta < this for 3 cycles = plateau
+
+agents:
+  architect:
+    flush_on_task_boundary: true
+    rationale: "Long arc reasoning helps mid-iteration; cross-iteration pollution causes 'married to old plan' bias."
+
+  backend:
+    flush_on_task_boundary: true
+    rationale: "Code edits benefit from local context; cross-feature contamination causes bad pattern reuse."
+
+  frontend:
+    flush_on_task_boundary: true
+    rationale: "Same as backend."
+
+  devops:
+    flush_after_event: deploy_complete
+    rationale: "Per feedback_validate_deploy_path: deploy outcomes must be re-verified, not assumed from session memory."
+
+  tester:
+    flush_after_event: test_run_complete
+    rationale: "Each run must observe reality fresh; prior-run memory causes 'I already tested this' false positives."
+
+  monitor:
+    strategy: sliding_window
+    window: 50
+    hard_flush_hours: 4
+    rationale: "Pure observability; no benefit to old alerts."
+
+  architect-blind-tester:
+    strategy: always_fresh
+    rationale: "Blind tests are blind by definition; resuming defeats purpose. Hard-coded in vmware-blind-test reports."
+
+  code-blind-tester:
+    strategy: always_fresh
+    rationale: "Same."
+
+  orchestrator:
+    strategy: summarize_and_restart
+    summarize_at_tokens: 50000
+    rationale: "Orchestrator needs cross-task memory for routing decisions, but loses fidelity past ~50K."

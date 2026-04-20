@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+agent-checkpoint — Save a checkpoint at a phase boundary.
+
+Usage:
+  agent-checkpoint <gap_id> <phase> <iteration> <trace_id> [--status in_progress|completed|failed]
+
+Example:
+  agent-checkpoint ARCH-IT-001 phase-3-coding 2 trace_12345678 --status completed
+"""
+import sys, json, os
+from pathlib import Path
+from datetime import datetime
+
+AGENT = os.environ.get("HERMES_AGENT", "unknown")
+CHECKPOINT_DIR = Path("/var/lib/karios/checkpoints")
+STATE_DIR = Path("/var/lib/karios/agent-state")
+
+def main():
+    if len(sys.argv) < 5:
+        print("Usage: agent-checkpoint <gap_id> <phase> <iteration> <trace_id> [--status status]")
+        sys.exit(1)
+
+    gap_id = sys.argv[1]
+    phase = sys.argv[2]
+    iteration = int(sys.argv[3])
+    trace_id = sys.argv[4]
+    status = "in_progress"
+    
+    i = 5
+    while i < len(sys.argv):
+        if sys.argv[i] == "--status" and i + 1 < len(sys.argv):
+            status = sys.argv[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    ckpt_dir = CHECKPOINT_DIR / AGENT / gap_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    
+    ckpt = {
+        "agent": AGENT,
+        "gap_id": gap_id,
+        "phase": phase,
+        "iteration": iteration,
+        "trace_id": trace_id,
+        "status": status,
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    
+    ckpt_file = ckpt_dir / f"{phase}_{trace_id}.json"
+    with open(ckpt_file, "w") as f:
+        json.dump(ckpt, f, indent=2)
+    
+    # Update latest
+    latest = ckpt_dir / "latest.json"
+    with open(latest, "w") as f:
+        json.dump(ckpt, f, indent=2)
+    
+    # Update agent-state
+    state_file = STATE_DIR / f"{AGENT}.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    if state_file.exists():
+        state = json.loads(state_file.read_text())
+    else:
+        state = {"agent": AGENT}
+    state["checkpoint"] = ckpt
+    state["phase"] = phase
+    state["iteration"] = iteration
+    state["trace_id"] = trace_id
+    state["last_update"] = ckpt["timestamp"]
+    state_file.write_text(json.dumps(state, indent=2))
+    
+    print(f"[{AGENT}] Checkpoint: {gap_id}/{phase} iter={iteration} trace={trace_id} status={status}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,18 @@
+{
+  "parent_gap": "ARCH-IT-ARCH-v9",
+  "parent_trace": "trace_ARCH-IT-ARCH-v9_v7.3",
+  "sub_tasks": [
+    {
+      "id": "ARCH-IT-ARCH-v9_backend",
+      "agent": "backend",
+      "scope": "backend_only",
+      "parent_trace": "trace_ARCH-IT-ARCH-v9_v7.3"
+    },
+    {
+      "id": "ARCH-IT-ARCH-v9_frontend",
+      "agent": "frontend",
+      "scope": "frontend_only",
+      "parent_trace": "trace_ARCH-IT-ARCH-v9_v7.3"
+    }
+  ]
+}

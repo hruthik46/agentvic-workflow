@@ -1,0 +1,24 @@
+[Unit]
+Description=Karios Architect-Blind-Tester (Phase 2 adversarial review)
+After=network.target redis.service karios-orchestrator-sub.service
+Wants=redis.service
+PartOf=karios.target
+
+[Service]
+Environment=KARIOS_HITL_DISABLE_LISTENER=1
+EnvironmentFile=-/etc/karios/secrets.env
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+User=root
+EnvironmentFile=/etc/karios/secrets.env
+Environment=HERMES_AGENT=architect-blind-tester
+ExecStart=/usr/local/bin/agent-worker architect-blind-tester
+ExecStartPost=/bin/sh -c 'date +%%s > /var/lib/karios/heartbeat/architect-blind-tester.beat'
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=karios-architect-blind-tester
+
+[Install]
+WantedBy=multi-user.target
