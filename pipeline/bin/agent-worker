@@ -561,45 +561,19 @@ You can write back so all 9 agents see your knowledge:
   /usr/local/bin/karios-vault learning|critique|rca|bug|fix|decision|memory ...
 The vault at /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/ is the source of truth.
 
-## v7.4 — code-review-graph (USE THIS FIRST for any code task) — 8.2x token savings
+## v7.13 — minimal injection (skill kairos-pipeline-operations has the rest)
 
-All 6 karios repos have a pre-built knowledge graph at `<repo>/.code-review-graph/graph.db`:
-  /root/karios-source-code/karios-migration/.code-review-graph/graph.db
-  /root/karios-source-code/karios-web/.code-review-graph/graph.db
-  /root/karios-source-code/karios-core/.code-review-graph/graph.db
-  /root/karios-source-code/karios-bootstrap/.code-review-graph/graph.db
+For code tasks: get_minimal_context(task="...") FIRST (saves 8-16x tokens). Then file_write.
+For git push: cd repo, git pull --rebase, git push. On conflict: karios-merge-resolve.
+NEVER push agentic-workflow files (blacklisted in .gitignore).
 
-The MCP server is auto-started by Hermes via each repo's .mcp.json — you have 22 tools available.
-**GOLDEN RULE: always start with `get_minimal_context(task="<5 words>")`** — returns ~100 tokens of situational
-awareness + next_tool_suggestions. Use detail_level="minimal" on subsequent calls. Target ≤5 tool calls,
-≤800 graph tokens per task. NEVER skip this — saves 8-16x tokens vs reading raw files.
+When done: agent send orchestrator "<subject> <body or commit_sha>"
 
-After writing code: `cd <repo> && uvx code-review-graph update` (incremental, <2s).
+Tools: terminal,file,web. Heartbeat: /usr/local/bin/agent-heartbeat {agent_name}.
+Full ops doc: read_file ~/.hermes/profiles/{agent_name}/SOUL.md if needed.
+Pipeline mechanics: hermes skill kairos-pipeline-operations.
 
-## v7.4 — Gitea push protocol (after successful commit)
-
-  1. cd <repo>
-  2. git pull --rebase origin <branch>
-  3. git push origin HEAD
-
-If conflicts: /usr/local/bin/karios-merge-resolve <repo> <file> consults vault for prior resolution.
-
-DO NOT push these to org repos (excluded by .gitignore — verify with `git status` before push):
-  *.hermes, **/karios-pipeline/**, multi-agent-architecture*.md, ARCH-IT-ARCH*, **/iteration-tracker/**,
-  karios-meta-*, karios-vault, obsidian_bridge*, .code-review-graph/, **/agent-worker
-The pipeline architecture lives only in the Obsidian vault and (later) Sai's personal repo.
-
-Important rules:
-- Do NOT contact the Tester agent directly (banned_from enforcement)
-- All work-contributing messages go through Orchestrator via: agent send orchestrator "<message>"
-- Archive all handoffs by using agent msg (auto-archives to Obsidian)
-- Write your heartbeat: /usr/local/bin/agent-heartbeat {agent_name}
-- Stream progress as you work: /usr/local/bin/agent-stream-progress "{tid}" "<message>"
-- When done, send [CODING-COMPLETE] or [TASK-COMPLETE] to orchestrator
-- Include your current state in the message body as JSON: {{"phase": "...", "iteration": N, "files_changed": [...]}}
-- Save a checkpoint at each phase boundary: /usr/local/bin/agent-checkpoint <gap_id> <phase> <iteration> <trace_id>
-
-Start working immediately. Do not ask for confirmation."""
+Start with a tool call. NO PROSE FIRST."""
 
     stream_progress("task_started", f"{AGENT} starting task (trace={tid})",
                    gap_id=gap_id, trace_id=tid, detail={"phase": phase})
@@ -723,28 +697,14 @@ You can write back so all 9 agents see your knowledge:
   /usr/local/bin/karios-vault learning|critique|rca|bug|fix|decision|memory ...
 The vault at /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/ is the source of truth.
 
-## v7.4 — code-review-graph (USE THIS FIRST for any code task) — 8.2x token savings
+## v7.13 — minimal injection (PTY watchdog enforced)
 
-All 6 karios repos have a pre-built knowledge graph at `<repo>/.code-review-graph/graph.db`:
-  /root/karios-source-code/karios-migration/.code-review-graph/graph.db
-  /root/karios-source-code/karios-web/.code-review-graph/graph.db
-  /root/karios-source-code/karios-core/.code-review-graph/graph.db
-  /root/karios-source-code/karios-bootstrap/.code-review-graph/graph.db
+For code: get_minimal_context(task="...") FIRST. Then file_write.
+For tests: cat test-cases.md, run test commands, file_write results.json with evidence.
+When done: agent send orchestrator "<subject> <body>".
+Heartbeat: /usr/local/bin/agent-heartbeat {agent_name}.
 
-The MCP server is auto-started by Hermes via each repo's .mcp.json — you have 22 tools available.
-**GOLDEN RULE: always start with `get_minimal_context(task="<5 words>")`** — returns ~100 tokens of situational
-awareness + next_tool_suggestions. Use detail_level="minimal" on subsequent calls. Target ≤5 tool calls,
-≤800 graph tokens per task. NEVER skip this — saves 8-16x tokens vs. reading raw files.
-
-Important rules:
-- Do NOT contact the Tester agent directly (banned_from enforcement)
-- All work-contributing messages go through Orchestrator via: agent send orchestrator "<message>"
-- Write your heartbeat: /usr/local/bin/agent-heartbeat {agent_name}
-- Stream progress as you work: /usr/local/bin/agent-stream-progress "{trace_id or ''}" "<message>"
-- When done, send [CODING-COMPLETE] or [TASK-COMPLETE] to orchestrator
-- Save a checkpoint at each phase boundary: /usr/local/bin/agent-checkpoint <gap_id> <phase> <iteration> <trace_id>
-
-Start working immediately. Do not ask for confirmation."""
+Watchdog SIGTERMs at 6000 chars with 0 tool_use. Start with a tool call. NO PROSE."""
 
     output_chunks = []
     tool_use_events = [0]

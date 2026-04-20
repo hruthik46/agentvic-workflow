@@ -2765,6 +2765,11 @@ def parse_message(msg_id: str, data: dict):
         return
 
     # ── Coding complete / FAN-IN ──────────────────────────────────────────
+    # v7.13: code-blind-tester emitting [CODING-COMPLETE] is a phantom — it should emit
+    # [E2E-RESULTS] in Phase 4. Drop these to stop the cycling spam.
+    if subject.startswith("[CODING-COMPLETE]") and sender in ("code-blind-tester", "architect-blind-tester", "tester"):
+        print(f"[dispatcher] DROP: [CODING-COMPLETE] from {sender} — wrong sender (only backend/frontend may emit). Should be [E2E-RESULTS].")
+        return
     if subject.startswith("[CODING-COMPLETE]") or subject.startswith("[FAN-IN]"):
         remaining = subject.split("]")[1].strip() if "]" in subject else subject
         tokens = remaining.split()
