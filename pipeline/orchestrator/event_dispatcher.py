@@ -505,8 +505,8 @@ def list_pending_checkpoints(gap_id: str) -> list:
 # ── Dynamic Routing ───────────────────────────────────────────────────────────
 # Routing thresholds
 ROUTING_FAST_TRACK = 9   # rating >= 9: skip ahead, minimal iterations
-ROUTING_ESCALATE_NOW = 4 # rating < 4: escalate immediately
-ROUTING_MEDIUM = 7       # 4 <= rating < 7: normal retry with self-diagnosis
+ROUTING_ESCALATE_NOW = 0  # v7.15: never escalate on rating; always revise (per Sai) # rating < 4: escalate immediately
+ROUTING_MEDIUM = 8       # v7.15: retry/revise threshold = 8 per Sai       # 4 <= rating < 7: normal retry with self-diagnosis
 
 def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dict:
     """
@@ -517,7 +517,7 @@ def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dic
         return {
             "route": "fast_track",
             "next_action": "proceed",
-            "iterations_left": max(0, 10 - iteration),
+            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
             "reason": f"rating {rating} >= {ROUTING_FAST_TRACK} — fast track"
         }
     elif rating < ROUTING_ESCALATE_NOW:
@@ -531,14 +531,14 @@ def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dic
         return {
             "route": "normal",
             "next_action": "retry_with_self_diagnosis",
-            "iterations_left": max(0, 10 - iteration),
+            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
             "reason": f"rating {rating} < {ROUTING_MEDIUM} — retry with self-correction"
         }
     else:
         return {
             "route": "normal",
             "next_action": "retry",
-            "iterations_left": max(0, 10 - iteration),
+            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
             "reason": f"rating {rating} >= {ROUTING_MEDIUM} — standard retry"
         }
 
@@ -1698,7 +1698,7 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
         print(f"[dispatcher] Gap {gap_id} FAST-TRACK: rating {rating} >= {ROUTING_FAST_TRACK}")
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
-        combined_issues = " ".join(critical_issues)
+        combined_issues = " ".join(str(i) if not isinstance(i, str) else i for i in critical_issues)  # v7.15: coerce dict items
         can_resolve, strategy, needs_escalate = self_diagnose(
             gap_id, "2-arch-loop", iteration, rating, combined_issues)
 
@@ -1916,7 +1916,7 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
         print(f"[dispatcher] Gap {gap_id} E2E FAST-TRACK: rating {rating}")
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
-        combined_issues = " ".join(critical_issues)
+        combined_issues = " ".join(str(i) if not isinstance(i, str) else i for i in critical_issues)  # v7.15: coerce dict items
         can_resolve, strategy, needs_escalate = self_diagnose(
             gap_id, "3-coding", iteration, rating, combined_issues)
 
@@ -1941,11 +1941,41 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                              self_diagnosis=strategy)
             update_agent_checkpoint("backend", phase="phase-3-coding", iteration=next_iter)
             update_agent_checkpoint("frontend", phase="phase-3-coding", iteration=next_iter)
-            send_to_agent("devops",
-                          f"[REDEPLOY] {gap_id} — self-correct iteration {next_iter}",
-                          f"Code self-correction iteration: {next_iter}/11\n"
-                          f"DevOps redeploy to staging, then notify orchestrator: [STAGING-DEPLOYED] {gap_id} iteration {next_iter}")
-            print(f"[dispatcher] Gap {gap_id} self-correcting coding: {strategy}")
+            # v7.15: dispatch BACKEND for code revise (not devops) — bugs need code fixes
+            _issues_str = "\n".join(
+                (f"- [{i.get('severity','?')}] {i.get('description', str(i)[:200])}"
+                 if isinstance(i, dict) else f"- {i}")
+                for i in critical_issues[:10]
+            )
+            if _PROMPT_BUILDER:
+                _revise_body = _build_prompt(
+                    task_type="CODE-REQUEST",
+                    gap_id=gap_id,
+                    iteration=next_iter,
+                    trace_id=tid,
+                    repo="karios-migration",
+                    intent_tags=["vmware", "7_dimensions"],
+                    intent_query=f"revise iter{next_iter} {gap_id}",
+                    commit_title=f"fix({gap_id}): iter{next_iter} address E2E critical issues",
+                    extra_context=(f"PRIOR E2E RATING: {rating}/10 (REJECT). Self-diagnosis: {strategy}\n\n"
+                                   f"CRITICAL ISSUES TO FIX (from code-blind-tester):\n{_issues_str}\n\n"
+                                   f"Iterate on EXISTING branch backend/{gap_id}-cbt — do NOT recreate. "
+                                   f"Fix each critical issue with new commits.")
+                )
+            else:
+                _revise_body = (f"E2E iter {iteration} rated {rating}/10. Critical issues:\n{_issues_str}\n\n"
+                                f"Fix and re-emit [CODING-COMPLETE] with new commit_sha.")
+            send_to_agent("backend",
+                          f"[CODE-REVISE] {gap_id} iteration {next_iter}",
+                          _revise_body,
+                          gap_id=gap_id, trace_id=tid, priority="high")
+            print(f"[dispatcher] Gap {gap_id} CODE-REVISE -> backend (iter {next_iter}/8): {strategy}")
+            try:
+                notify_phase_transition(gap_id, "code-blind-tester", f"backend (revise iter {next_iter})",
+                                        "E2E-REVISE", rating=rating,
+                                        summary=f"rating {rating}/10 — backend revising. Issues: {len(critical_issues)} critical.")
+            except Exception as _e:
+                print(f"[dispatcher] notify error: {_e}")
 
     else:
         next_iter = iteration + 1
