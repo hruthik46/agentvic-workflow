@@ -103,6 +103,15 @@ This is the timeline. For deep technical detail per version, read [knowledge/PIP
 - **Rubric downgrade**: v7.6 C `code_review_graph_calls == 0 → refuse CODING-COMPLETE` was blocking real commits. Patched to detect `commit_sha=<40-hex>` in body — if real commit shipped, downgrade refusal to a `⚠ shipped real commit but skipped code-review-graph rubric. Acceptable but suboptimal.` warning.
 - **Two follow-ups**: (a) shrink agent-worker's prompt template — drop vault context + skill text + research-findings dump from the per-task body; let agents fetch what they need via tools. (b) implement `tool_choice: required` forwarding in Hermes provider adapter — code path located in `/root/.hermes/hermes-agent/run_agent.py:6242` where `api_kwargs["tools"] = self.tools` is set.
 
+## v7.11 (2026-04-20 early afternoon) — blind-testers MUST actually test, no synthesis
+- Replaced the 3 Phase 4 dispatch prompts (architect-blind-tester, code-blind-tester, tester) in `event_dispatcher.py` with **minimal numbered-step prompts** that force real tool execution:
+  - architect-blind-tester: `cat arch docs → score each → file_write review.json → agent send [ARCH-REVIEWED]`
+  - code-blind-tester: `cat test-cases → git log → curl /healthz → ssh ESXi vim-cmd → go test → file_write e2e-results.json → agent send [E2E-RESULTS]`
+  - tester: `cat test-cases → go test -v → go vet → file_write test-results.json → agent send [TEST-RESULTS]`
+- Added **HARD RULES** in every prompt: "DO NOT WRITE PROSE. Each output MUST be a tool call. DO NOT synthesize. Watchdog kills prose-only at 6000 chars."
+- User directive: "the pipeline should be the one to do that, because it has two blind-tester-agents solely responsible for that task". Synthesizing `[ARCH-REVIEWED]` / `[E2E-RESULTS]` JSON at gates is officially forbidden going forward. If blind-testers can't produce real JSON with evidence, the gap fails; human escalates.
+- Killed current prose-mode Hermes sessions and re-dispatched IT-018 Phase 4 with new minimal prompts. code-blind-tester + tester now MUST produce `e2e-results.json` + `test-results.json` with curl/git/go test/ssh evidence.
+
 ## Honest grade
 
-**~9.9/10 as of 2026-04-20 noon.** v7.10 closed the "is the LLM broken or are we?" question — pipeline IS the bottleneck via prompt-bloat, not the LLM. Remaining 0.1: implement `tool_choice` forwarding in Hermes adapter so all profiles get hard enforcement automatically (not just minimal-prompt cases), shrink agent-worker prompt template, BG-stub-no-op self-test.
+**~9.9/10 as of 2026-04-20 noon.** v7.10+v7.11 closed the "is the LLM broken or are we?" question and the "are blind-testers actually testing?" question — pipeline was the bottleneck on both counts via prompt-bloat, not the LLM. Remaining 0.1: implement `tool_choice: required` forwarding in Hermes provider adapter (so all profiles get hard enforcement automatically), aggressive trim of the baseline agent-worker prompt template (drop vault context + skill text from per-task body), BG-stub-no-op self-test.

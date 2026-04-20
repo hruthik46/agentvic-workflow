@@ -1536,31 +1536,22 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
         print(f"[dispatcher] WARNING: {arch_doc} not found, skipping review")
         return
 
+    _review_body = (
+        f"TASK: Blind architecture review for {gap_id} iter {iteration}.\n\n"
+        f"STEP 1 (REQUIRED FIRST — use bash tool): cat {arch_doc}\n"
+        f"STEP 2 (bash): ls /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/\n"
+        f"STEP 3 (bash): for each doc in that dir — cat it and score it\n"
+        f"STEP 4 (file_write): /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/review.json with this schema:\n"
+        f'    {{"gap_id":"{gap_id}","iteration":{iteration},"rating":N,"critical_issues":[...],"dimensions":{{"correctness":N,"completeness":N,"feasibility":N,"security":N,"testability":N,"resilience":N}},"adversarial_test_cases":{{...}},"recommendation":"APPROVE|REQUEST_CHANGES|REJECT","summary":"...","trace_id":"{tid}"}}\n'
+        f"STEP 5 (bash): emit [ARCH-REVIEWED] with the review JSON in body:\n"
+        f"    /usr/local/bin/agent-stream-progress '{tid}' '[ARCH-REVIEWED] {gap_id} iteration {iteration}'\n"
+        f"    then send the full JSON via: agent send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\" < review.json\n\n"
+        f"DO NOT WRITE PROSE. Each output MUST be a tool call. Watchdog kills prose-only sessions at 6000 chars.\n"
+        f"Your role doc is at ~/.hermes/profiles/architect-blind-tester/SOUL.md — consult it only if needed via read_file."
+    )
     send_to_agent("architect-blind-tester",
                   f"[ARCH-BLIND-REVIEW] {gap_id} iteration {iteration}",
-                  f"""Architecture document ready for blind review.
-
-Gap ID: {gap_id}
-Iteration: {iteration}/10
-Architecture doc: {arch_doc}
-trace_id: {tid}
-
-Your role: Architect-Blind-Tester — you review the ARCHITECTURE DOCUMENT ONLY.
-You do NOT see code, implementation details, or the Architect's reasoning.
-Rate the architecture on ALL 6 dimensions:
-- Correctness: Does it solve the requirement?
-- Completeness: Are all edge cases covered?
-- Feasibility: Can this be built and deployed?
-- Security: Are there obvious security gaps?
-- Testability: Can this be properly tested?
-- Resilience: Is rollback plan defined? Circuit breakers? Data loss risks?
-
-IMPORTANT: Generate adversarial test cases BEFORE giving your rating.
-See the Architect-Blind-Tester profile for the full adversarial test generation workflow.
-
-Rate 0-10 and list critical issues per dimension.
-When done, send to orchestrator: subject=[ARCH-REVIEWED] {gap_id} iteration {iteration}
-body=JSON with {{"rating": N, "critical_issues": [...], "dimensions": {{...}}, "adversarial_test_cases": {{...}}, "recommendation": "APPROVE|REQUEST_CHANGES|REJECT", "summary": "...", "trace_id": "{tid}"}}""",
+                  _review_body,
                   gap_id=gap_id, trace_id=tid, priority="normal")
     print(f"[dispatcher] Submitted {gap_id} arch iteration {iteration} for blind review (trace={tid})")
 
@@ -2685,16 +2676,37 @@ def parse_message(msg_id: str, data: dict):
                             gap_id=gap_id, trace_id=trace_id)
             elif n_phase in ("3-coding-sync", "3-coding-testing") or n_phase.startswith("3-coding"):
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
+                _e2e_body = (
+                    f"TASK: Real E2E test of {gap_id} iter {iteration}. NO synthesis — run actual commands.\n\n"
+                    f"STEP 1 (REQUIRED FIRST — bash): cat /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/test-cases.md\n"
+                    f"STEP 2 (bash): curl -sI http://192.168.118.106:8089/api/v1/healthz — confirm API alive\n"
+                    f"STEP 3 (bash for VMware gaps): ssh -o StrictHostKeyChecking=no root@192.168.115.232 'vim-cmd vmsvc/getallvms | head' — probe ESXi\n"
+                    f"STEP 4 (bash): cd /root/karios-source-code/karios-playwright && npx playwright test --reporter=json > /tmp/pw-{gap_id}.json 2>&1 || true\n"
+                    f"STEP 5 (file_write): /var/lib/karios/iteration-tracker/{gap_id}/phase-3-coding/iteration-{iteration}/e2e-results.json with:\n"
+                    f'    {{"gap_id":"{gap_id}","iteration":{iteration},"rating":N,"recommendation":"APPROVE|REJECT","summary":"what actually ran and what passed","critical_issues":[...],"dimensions":{{"functional_correctness":N,"edge_cases":N,"security":N,"performance":N,"concurrency":N,"resilience":N,"error_handling":N}},"adversarial_test_cases":{{"test_id":"pass|fail + evidence"}},"trace_id":"{trace_id}"}}\n'
+                    f"STEP 6 (bash): agent send orchestrator \"[E2E-RESULTS] {gap_id} iteration {iteration}\" < /var/lib/karios/iteration-tracker/{gap_id}/phase-3-coding/iteration-{iteration}/e2e-results.json\n\n"
+                    f"HARD RULES:\n"
+                    f"- DO NOT WRITE PROSE. Each output MUST be a tool call.\n"
+                    f"- DO NOT synthesize results. If you cannot run a test, mark it 'skipped — reason: X'.\n"
+                    f"- Real evidence required: curl output, playwright reporter JSON, ESXi vim-cmd output.\n"
+                    f"- Watchdog kills prose-only sessions at 6000 chars.\n"
+                    f"- Your role doc: ~/.hermes/profiles/code-blind-tester/SOUL.md (read only if needed)."
+                )
                 send_to_agent("code-blind-tester",
                             f"[E2E-REVIEW] {gap_id} iteration {iteration}",
-                            f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
-                            "Run adversarial E2E tests against the deployed implementation. "
-                            "Report rating + critical_issues as JSON via [E2E-RESULTS].",
+                            _e2e_body,
                             gap_id=gap_id, trace_id=trace_id)
+                _test_body = (
+                    f"TASK: Execute functional test plan for {gap_id} iter {iteration}.\n\n"
+                    f"STEP 1 (bash): cat /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/test-cases.md\n"
+                    f"STEP 2 (bash): for each test case in the plan — execute the commands listed\n"
+                    f"STEP 3 (file_write): /var/lib/karios/iteration-tracker/{gap_id}/phase-3-coding/iteration-{iteration}/test-results.json\n"
+                    f"STEP 4 (bash): agent send orchestrator \"[TEST-RESULTS] {gap_id} iteration {iteration}\" < test-results.json\n\n"
+                    f"DO NOT WRITE PROSE. Each output MUST be a tool call. Report honest skipped/pass/fail counts."
+                )
                 send_to_agent("tester",
                             f"[TEST-RUN] {gap_id} iteration {iteration}",
-                            f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
-                            "Execute the test plan from architecture docs. Report status.",
+                            _test_body,
                             gap_id=gap_id, trace_id=trace_id)
                 update_gap_phase(gap_id, "4-testing", iteration=iteration, trace_id=trace_id)
                 try:
