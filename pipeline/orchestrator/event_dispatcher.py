@@ -31,6 +31,15 @@ Key rules:
 
 import os, sys, json, time, subprocess, uuid, threading, re
 
+# v7.12: central prompt builder — single source of truth for all dispatch prompts
+try:
+    sys.path.insert(0, '/var/lib/karios/orchestrator')
+    from prompt_builder import build_prompt as _build_prompt
+    _PROMPT_BUILDER = True
+except ImportError as _pbe:
+    print(f'[dispatcher] WARN: prompt_builder not loaded ({_pbe}); using legacy inline prompts')
+    _PROMPT_BUILDER = False
+
 # v7.6: Pydantic message-boundary validation
 try:
     sys.path.insert(0, '/var/lib/karios/orchestrator')
@@ -1536,7 +1545,18 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
         print(f"[dispatcher] WARNING: {arch_doc} not found, skipping review")
         return
 
-    _review_body = (
+    # v7.12: use build_prompt (deterministic minimal prompt with 7-dimension intent)
+    if _PROMPT_BUILDER:
+        _review_body = _build_prompt(
+            task_type="ARCH-BLIND-REVIEW",
+            gap_id=gap_id,
+            iteration=iteration,
+            trace_id=tid,
+            intent_tags=["7_dimensions"],
+            intent_query=f"blind architecture review {gap_id}",
+        )
+    else:
+        _review_body = (
         f"TASK: Blind architecture review for {gap_id} iter {iteration}.\n\n"
         f"STEP 1 (REQUIRED FIRST — use bash tool): cat {arch_doc}\n"
         f"STEP 2 (bash): ls /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/\n"
@@ -1548,7 +1568,7 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
         f"    then send the full JSON via: agent send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\" < review.json\n\n"
         f"DO NOT WRITE PROSE. Each output MUST be a tool call. Watchdog kills prose-only sessions at 6000 chars.\n"
         f"Your role doc is at ~/.hermes/profiles/architect-blind-tester/SOUL.md — consult it only if needed via read_file."
-    )
+)
     send_to_agent("architect-blind-tester",
                   f"[ARCH-BLIND-REVIEW] {gap_id} iteration {iteration}",
                   _review_body,
@@ -2676,7 +2696,19 @@ def parse_message(msg_id: str, data: dict):
                             gap_id=gap_id, trace_id=trace_id)
             elif n_phase in ("3-coding-sync", "3-coding-testing") or n_phase.startswith("3-coding"):
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
-                _e2e_body = (
+                # v7.12: E2E build_prompt — 7 dimensions + VMware intent
+                if _PROMPT_BUILDER:
+                    _e2e_body = _build_prompt(
+                        task_type="E2E-REVIEW",
+                        gap_id=gap_id,
+                        iteration=iteration,
+                        trace_id=trace_id,
+                        repo="karios-migration",
+                        intent_tags=["7_dimensions", "vmware", "adversarial"],
+                        intent_query=f"e2e test {gap_id}",
+                    )
+                else:
+                                    _e2e_body = (
                     f"TASK: Real E2E test of {gap_id} iter {iteration}. NO synthesis — run actual commands.\n\n"
                     f"STEP 1 (REQUIRED FIRST — bash): cat /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/test-cases.md\n"
                     f"STEP 2 (bash): curl -sI http://192.168.118.106:8089/api/v1/healthz — confirm API alive\n"
@@ -2696,7 +2728,18 @@ def parse_message(msg_id: str, data: dict):
                             f"[E2E-REVIEW] {gap_id} iteration {iteration}",
                             _e2e_body,
                             gap_id=gap_id, trace_id=trace_id)
-                _test_body = (
+                # v7.12: TEST-RUN build_prompt
+                if _PROMPT_BUILDER:
+                    _test_body = _build_prompt(
+                        task_type="TEST-RUN",
+                        gap_id=gap_id,
+                        iteration=iteration,
+                        trace_id=trace_id,
+                        repo="karios-migration",
+                        intent_query=f"functional tests {gap_id}",
+                    )
+                else:
+                                    _test_body = (
                     f"TASK: Execute functional test plan for {gap_id} iter {iteration}.\n\n"
                     f"STEP 1 (bash): cat /var/lib/karios/iteration-tracker/{gap_id}/phase-2-architecture/iteration-{iteration}/test-cases.md\n"
                     f"STEP 2 (bash): for each test case in the plan — execute the commands listed\n"
@@ -3168,7 +3211,19 @@ def main():
             req_file = REQS_DIR / f"{gid}.md"
             if req_file.exists():
                 req_text = req_file.read_text()[:2000]
-            body = (
+            # v7.12: ARCH-DESIGN build_prompt (startup) — preserves intent via tags
+            if _PROMPT_BUILDER:
+                body = _build_prompt(
+                    task_type="ARCH-DESIGN",
+                    gap_id=gid,
+                    iteration=iteration,
+                    trace_id=trace_id,
+                    intent_tags=["7_dimensions"],
+                    intent_query=f"architecture design {gid}",
+                    extra_context=f"Requirement:\n{req_text[:1500]}" if req_text else ""
+                )
+            else:
+                            body = (
                 f"Resume Phase 2 architecture design for {gid} (iteration {iteration}).\n"
                 f"trace_id: {trace_id}\n"
                 f"Requirement context:\n{req_text}\n\n"

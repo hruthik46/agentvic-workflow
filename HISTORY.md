@@ -112,6 +112,41 @@ This is the timeline. For deep technical detail per version, read [knowledge/PIP
 - User directive: "the pipeline should be the one to do that, because it has two blind-tester-agents solely responsible for that task". Synthesizing `[ARCH-REVIEWED]` / `[E2E-RESULTS]` JSON at gates is officially forbidden going forward. If blind-testers can't produce real JSON with evidence, the gap fails; human escalates.
 - Killed current prose-mode Hermes sessions and re-dispatched IT-018 Phase 4 with new minimal prompts. code-blind-tester + tester now MUST produce `e2e-results.json` + `test-results.json` with curl/git/go test/ssh evidence.
 
+## v7.12 (2026-04-20 early afternoon) — deterministic prompt-builder + MiniMax-tuned Hermes config
+**Problem stated by user**: "write a program or the pipeline should integrate... so that the prompts are points-wise simple and everything should happen with no hassle, but the old intent should not be missing."
+
+**Solution chosen: deterministic prompt builder over LLM-based rewriter.**
+- `prompt_builder.py` in `/var/lib/karios/orchestrator/` — single source of truth for every dispatch prompt
+- 6 task templates (`ARCH-DESIGN`, `ARCH-BLIND-REVIEW`, `CODE-REQUEST`, `E2E-REVIEW`, `TEST-RUN`, `PRODUCTION`) — each a numbered list of tool-call steps
+- **Intent tags preserve original intent** without bloat: `7_dimensions`, `vmware`, `cloudstack`, `adversarial`, `pipeline_internal`. Each tag adds a single-line enrichment. All 7 testing dimensions stay explicit in the JSON schema emitted by the blind-tester template.
+- **Smoke-tested prompt sizes** (all under 2600 chars):
+  - ARCH-DESIGN: 1660
+  - ARCH-BLIND-REVIEW: 2040
+  - CODE-REQUEST: 1772
+  - E2E-REVIEW: 2574
+  - TEST-RUN: 1148
+  - PRODUCTION: 1166
+- Dispatcher imports `build_prompt` at startup; 4 dispatch sites wired. Legacy inline strings kept as fallback if import fails.
+
+**MiniMax-M2.7 research findings applied** (via research subagent):
+| Config | Before | After (v7.12) | Source |
+|---|---|---|---|
+| `agent.max_turns` | 400 | **60** | Hermes cli-config.yaml.example recommends 60 for focused tasks |
+| `agent.reasoning_effort` | medium | medium (keep) | High doubles output cost on already-verbose MiniMax |
+| `agent.tool_use_enforcement` | true | true (keep) | But prompt-level only — API-level `tool_choice` forwarding is item F, still pending |
+| Per-turn output cap | N/A | (target 4096) | MiniMax drifts to prose above this |
+
+**MiniMax-M2.7 specs** (captured for future node bring-up):
+- Context window: 200K tokens (sweet spot 32-64K; verbosity bias above)
+- Max output: 65,536 tokens
+- Architecture: 230B MoE, 10B active
+- Tool-use: native OpenAI-compat `tool_choice: "required"` works (verified via direct API test)
+- Sampling: temp=1.0, top_p=0.95, top_k=40 (official)
+- Rate limits: 500 RPM / 20M TPM paid tier
+- Known quirk: always echo reasoning back in multi-turn — dropping it breaks tool chain
+
+**Lesson**: the research found MiniMax-M2.7 with `max_turns: 400` at ~48 tok/s means a single pipeline run could burn ~28 minutes + $$$. `max_turns: 60` is both safer and faster.
+
 ## Honest grade
 
-**~9.9/10 as of 2026-04-20 noon.** v7.10+v7.11 closed the "is the LLM broken or are we?" question and the "are blind-testers actually testing?" question — pipeline was the bottleneck on both counts via prompt-bloat, not the LLM. Remaining 0.1: implement `tool_choice: required` forwarding in Hermes provider adapter (so all profiles get hard enforcement automatically), aggressive trim of the baseline agent-worker prompt template (drop vault context + skill text from per-task body), BG-stub-no-op self-test.
+**~9.9/10 as of 2026-04-20 early afternoon.** Prompt builder makes minimal dispatch the default (not a manual override). Intent preservation verified via smoke test. Remaining 0.1: `tool_choice: required` forwarding in Hermes provider adapter (automatic hard enforcement), BG-stub-no-op self-test, agent-worker's baseline per-task prompt template (not just dispatcher output) still bloats with vault context + skill text — needs trimming.

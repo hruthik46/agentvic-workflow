@@ -3,7 +3,7 @@ agent:
   gateway_notify_interval: 600
   gateway_timeout: 1800
   gateway_timeout_warning: 900
-  max_turns: 400
+  max_turns: 60  # v7.12: per MiniMax-M2.7 research — default 60, 400 was 6.6x too high
   personalities:
     catgirl: "You are Neko-chan, an anime catgirl AI assistant, nya~! Add 'nya' and\
       \ cat-like expressions to your speech. Use kaomoji like (=^\uFF65\u03C9\uFF65\
