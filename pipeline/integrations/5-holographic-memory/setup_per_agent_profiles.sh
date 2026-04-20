@@ -23,17 +23,12 @@ memory:
     auto_extract_on_session_end: true
     max_db_size_mb: 500
 
-plugins:
-  enabled:
-    - kairos-obsidian-bridge
 EOF
         echo "✓ $agent: memory + plugins added"
     else
         echo "  $agent: already configured"
     fi
 
-    # Symlink the plugin
-    ln -sf /root/.hermes/plugins/kairos-obsidian-bridge $profile_dir/plugins/
 
     # Touch MEMORY.md + USER.md so Hermes finds them
     touch $profile_dir/MEMORY.md $profile_dir/USER.md
