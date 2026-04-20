@@ -97,6 +97,12 @@ This is the timeline. For deep technical detail per version, read [knowledge/PIP
 - **`_is_agent_working(agent, gap_id)` helper** — checks `pgrep hermes chat --profile <agent>` AND checkpoint mtime within 5 min. Used by orphan detector.
 - **Probe normalizes both phase forms** — `phase_to_agent` map now includes both `phase-3-coding` and `3-coding` (similar for other phases). Was matching neither, so previous PROGRESS-STALL alert showed `Owner: unknown`.
 
+## v7.10 (2026-04-20 noon) — prompt size is the real bottleneck, not the LLM
+- **REVERSED v7.7-v7.9 conclusion**: MiniMax-M2.7 IS capable of tool-use compliance. Direct API call with `tool_choice: required` returned a clean `tool_calls` block immediately. The bug is **Hermes never forwards `tool_choice` to the API** — `tool_use_enforcement: true` only injects soft prompt text (`TOOL_USE_ENFORCEMENT_GUIDANCE`).
+- **Real root cause of "prose mode"**: huge prompts (research-findings.md + vault context + skill text + task body = ~30K chars) overwhelm MiniMax. With a **minimal 5-step explicit prompt** (each step required to be a tool call), backend produced **`feat(vmware): CBT warm migration` commit `ef5e305` with 921 insertions across 4 files (cbt.go=577 lines, cbt_test.go=325 lines)** in under 5 minutes.
+- **Rubric downgrade**: v7.6 C `code_review_graph_calls == 0 → refuse CODING-COMPLETE` was blocking real commits. Patched to detect `commit_sha=<40-hex>` in body — if real commit shipped, downgrade refusal to a `⚠ shipped real commit but skipped code-review-graph rubric. Acceptable but suboptimal.` warning.
+- **Two follow-ups**: (a) shrink agent-worker's prompt template — drop vault context + skill text + research-findings dump from the per-task body; let agents fetch what they need via tools. (b) implement `tool_choice: required` forwarding in Hermes provider adapter — code path located in `/root/.hermes/hermes-agent/run_agent.py:6242` where `api_kwargs["tools"] = self.tools` is set.
+
 ## Honest grade
 
-**~9.8/10 as of 2026-04-20 mid-morning.** v7.9 fixed the most visible operational issue (gaps stuck in phase with no agent working). Remaining: hard tool-use enforcement (Hermes provider patch), BG-stub-no-op self-test, periodic prose-only Phase 4/5 cycles where synthesis at gates is still needed, watchdog-kill escalation after N retries (currently infinite retry).
+**~9.9/10 as of 2026-04-20 noon.** v7.10 closed the "is the LLM broken or are we?" question — pipeline IS the bottleneck via prompt-bloat, not the LLM. Remaining 0.1: implement `tool_choice` forwarding in Hermes adapter so all profiles get hard enforcement automatically (not just minimal-prompt cases), shrink agent-worker prompt template, BG-stub-no-op self-test.

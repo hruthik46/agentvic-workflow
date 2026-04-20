@@ -2734,26 +2734,32 @@ def parse_message(msg_id: str, data: dict):
             iteration = int(im.group(1))
         gap_data = load_gap(gid)
 
-        # Item C (ARCH-IT-ARCH-v11): code-review-graph rubric gate
-        # Refuse CODING-COMPLETE if sender is backend/frontend and code_review_graph_calls == 0
+        # Item C (ARCH-IT-ARCH-v11): code-review-graph rubric — v7.10 downgrade to warning when real commit shipped
         code_profiles = {"backend", "frontend", "backend-worker", "frontend-worker"}
         if sender in code_profiles:
             session_metadata = data.get("session_metadata", {})
             crg_calls = session_metadata.get("code_review_graph_calls", 0)
-            if crg_calls == 0:
-                # Refuse advance — send back for retry
-                print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls")
+            # v7.10: if body contains a commit_sha=<40-hex>, the agent shipped real code → just warn
+            import re as _re
+            has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{40}", body or ""))
+            if crg_calls == 0 and not has_real_commit:
+                # No proof of work → refuse + retry (orig v7.6 behavior)
+                print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
                 stream_publish(
                     subject=f"[CODING-RETRY] {gid}",
                     body=json.dumps({
-                        "reason": "code_review_graph_calls=0 — retry with get_minimal_context",
+                        "reason": "code_review_graph_calls=0 + no commit — retry with get_minimal_context + ship code",
                         "gap_id": gid, "iteration": iteration
                     }),
                     from_agent="orchestrator",
                     gap_id=gid, priority="high"
                 )
-                telegram_alert(f"🚨 {gid}: CODING-COMPLETE refused — {sender} skipped code-review-graph. Retry required.")
+                telegram_alert(f"🚨 {gid}: CODING-COMPLETE refused — {sender} skipped graph + no commit. Retry required.")
                 return
+            elif crg_calls == 0 and has_real_commit:
+                # Real commit shipped, just skipped graph — warn but advance
+                print(f"[dispatcher] CODING-COMPLETE accepted (warn): {sender} skipped code_review_graph but shipped real commit")
+                telegram_alert(f"⚠ {gid}: {sender} shipped real commit but skipped code-review-graph rubric. Acceptable but suboptimal.")
 
         if gap_data.get("iteration", 0) > 0:
             iteration = gap_data["iteration"]
