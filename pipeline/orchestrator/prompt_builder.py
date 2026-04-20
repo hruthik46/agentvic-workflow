@@ -122,7 +122,10 @@ _TEMPLATES = {
             "bash: cd /root/karios-source-code/{repo} && git log --oneline backend/{gid}-{date} | head -5",
             "bash: cd /root/karios-source-code/{repo} && git show <top-commit-sha> --stat",
             "bash: curl -sI http://192.168.118.106:8089/api/v1/healthz",
-            "bash: sshpass -p '<SSH_PW>' ssh -o StrictHostKeyChecking=no root@192.168.115.232 'vim-cmd vmsvc/getallvms' | head -15  # ESXi probe for VMware gaps",
+            "bash: govc -u 'root:<SSH_PW>@192.168.115.233' -k about  # vCenter probe (vCenter Server 8.0.2)",
+            "bash: govc -u 'root:<SSH_PW>@192.168.115.233' -k host.info -host '*' 2>&1 | head -30  # vCenter cluster hosts",
+            "bash: sshpass -p '<SSH_PW>' ssh -o StrictHostKeyChecking=no root@192.168.115.232 'vim-cmd vmsvc/getallvms' | head -15  # standalone ESXi Node A probe",
+            "bash: sshpass -p '<SSH_PW>' ssh -o StrictHostKeyChecking=no root@192.168.115.23 'vim-cmd vmsvc/getallvms' | head -10  # licensed ESXi Node B (CBT-capable)",
             "bash: cd /root/karios-source-code/{repo} && git checkout backend/{gid}-{date} && go test ./... -v 2>&1 | tail -50",
             "bash: cd /root/karios-source-code/karios-playwright && npx playwright test --reporter=json > /tmp/pw-{gid}.json 2>&1 || true",
             "file_write: /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/e2e-results.json with schema below (all 7 dimensions, evidence populated from outputs above)",
@@ -176,7 +179,15 @@ _TEMPLATES = {
 # ── Intent tags — optional enrichments ───────────────────────────────────────
 _INTENT_EXTRAS = {
     "7_dimensions": "All 7 dimensions (functional_correctness, edge_cases, security, performance, concurrency, resilience, error_handling) MUST have a numeric rating + evidence in adversarial_test_cases.",
-    "vmware": "VMware context: ESXi 8.0.3 at 192.168.115.232 (free, 9 test VMs) / licensed at 192.168.115.23. Use govmomi or vim-cmd over SSH.",
+    "vmware": ("VMware infrastructure (KRE-Lab):\n"
+            "  - vCenter: 192.168.115.233 (vCenter Server 8.0.2 build-24321653) — govc/govmomi for cluster ops\n"
+            "  - ESXi Node A: 192.168.115.232 (FREE, 16c/95GB, datastore1, 9 test VMs: ubuntu-vm, karios-test, win-vm, bios-ide-test, multi-nic-test, bsd-efi-bootonly-loader, etc)\n"
+            "  - ESXi Node B: 192.168.115.23 (LICENSED — CBT, vMotion, advanced features, 4c/63GB)\n"
+            "  - Cluster: Cluster-01 (DRS enabled, no shared storage)\n"
+            "  - SSH user/pass for ALL three: root / <REDACTED-SSH-PASSWORD>\n"
+            "  - vCenter REST API base: https://192.168.115.233/rest/com/vmware/\n"
+            "  - CRITICAL govmomi gotcha: HostSystem.summary.managementServerIp returns vCenter IP NOT ESXi IP. Use HostSystem.name for actual host IP.\n"
+            "  - Tests MUST run against BOTH standalone ESXi (.232) AND vCenter-managed flow (.233 → .232/.23) — both are valid karios-migration source types."),
     "cloudstack": "CloudStack API on localhost:8080 (401 = alive). karios-core on 192.168.118.106.",
     "adversarial": "You are ADVERSARIAL. Your job is to BREAK the system. If you can't break it after systematic testing → it passes.",
     "pipeline_internal": "This change touches the pipeline itself (not product code). Files land at /var/lib/karios/ or /usr/local/bin/ — they are NOT pushed to gitea org repos (blacklist enforced). Push agentic-workflow files to github.com/hruthik46/agentvic-workflow only.",
