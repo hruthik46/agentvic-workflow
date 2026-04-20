@@ -2177,23 +2177,49 @@ def _update_active_gap_state(gap_id: str, phase: str = None, state: str = None, 
 
 
 # v7.8: Progress probe — detect stuck active phases
-_PROGRESS_PROBE_STATE = {}  # gap_id -> {"last_check_ts": int, "last_size": int, "stale_count": int}
+_PROBE_STATE_FILE = Path("/var/lib/karios/orchestrator/progress-probe-state.json")
+
+def _load_probe_state():
+    """v7.9: load probe state from disk so stall detection survives dispatcher restarts."""
+    try:
+        if _PROBE_STATE_FILE.exists():
+            return json.loads(_PROBE_STATE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_probe_state(st):
+    try:
+        _PROBE_STATE_FILE.write_text(json.dumps(st, indent=2))
+    except Exception as e:
+        print(f"[probe] save state failed: {e}")
+
+_PROGRESS_PROBE_STATE = _load_probe_state()  # v7.9: persisted across restarts
 PROGRESS_STALL_SECS = 480  # 8 min with no growth → considered stuck
 PROGRESS_KILL_AFTER_STALLS = 2  # 2 consecutive stalls → kill agent
 
 def _gap_iter_tracker_size(gap_id: str) -> int:
-    """Total bytes in this gap's iteration-tracker dir."""
+    """v7.8.1: Count bytes in MEANINGFUL files only — ignore metadata.json and *.tmp
+    which get touched every dispatcher cycle (nudge, resume, etc) and would mask real stalls.
+    Meaningful = *.md, review.json, decomposition.json, e2e-results.json."""
     base = Path(f"/var/lib/karios/iteration-tracker/{gap_id}")
     if not base.exists():
         return 0
     total = 0
+    MEANINGFUL = ('.md', 'review.json', 'decomposition.json', 'e2e-results.json', 'manifest.json', 'api-contract.json')
     try:
         for f in base.rglob("*"):
-            if f.is_file():
-                try:
-                    total += f.stat().st_size
-                except Exception:
-                    pass
+            if not f.is_file():
+                continue
+            name = f.name
+            if name == 'metadata.json' or name.endswith('.tmp'):
+                continue
+            if not (name.endswith('.md') or name in MEANINGFUL):
+                continue
+            try:
+                total += f.stat().st_size
+            except Exception:
+                pass
     except Exception:
         pass
     return total
@@ -2215,6 +2241,27 @@ def _kill_agent_hermes(agent_short: str) -> bool:
         print(f"[probe] pgrep failed: {e}")
         return False
 
+def _is_agent_working(agent_short: str, gap_id: str) -> bool:
+    """v7.9: Returns True if agent_short has an active Hermes process OR recent checkpoint write."""
+    import subprocess as _sp, time as _t
+    try:
+        out = _sp.run(["pgrep", "-f", f"hermes chat --profile {agent_short}"],
+                      capture_output=True, text=True, timeout=3).stdout.strip()
+        if out:
+            return True
+    except Exception:
+        pass
+    # Fallback: check checkpoint mtime
+    try:
+        from pathlib import Path as _P
+        ckpt = _P(f"/var/lib/karios/checkpoints/{agent_short}/{gap_id}/latest.json")
+        if ckpt.exists() and (_t.time() - ckpt.stat().st_mtime) < 300:  # 5 min
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def progress_probe_check():
     """Called periodically from dispatcher main loop. Detects + reacts to stuck gaps."""
     import time as _t
@@ -2225,7 +2272,9 @@ def progress_probe_check():
         for gap_id, ge in ag.items():
             if ge.get("state") in ("completed", "closed", "cancelled", "escalated"):
                 continue
-            phase = ge.get("phase", "")
+            # v7.8.1: phase lives in gap metadata file, not active_gaps entry. Use load_gap.
+            gdata = load_gap(gap_id) or {}
+            phase = gdata.get("phase") or ge.get("phase", "")
             if not phase or phase in ("completed", "closed", "idle"):
                 continue
             # Check iteration-tracker growth
@@ -2240,20 +2289,51 @@ def progress_probe_check():
                 ps["stale_count"] = 0
                 ps["last_size"] = cur_size
                 ps["last_check_ts"] = now
+                _save_probe_state(_PROGRESS_PROBE_STATE)
             else:
                 ps["stale_count"] += 1
                 ps["last_check_ts"] = now
+                _save_probe_state(_PROGRESS_PROBE_STATE)
                 # Determine which agent owns this phase
                 phase_to_agent = {
                     "phase-2-arch-loop": "architect",
                     "phase-2-architecture": "architect",
+                    "2-arch-loop": "architect",
+                    "2-architecture": "architect",
                     "phase-3-coding": "backend",
+                    "3-coding": "backend",
                     "phase-3-coding-sync": "backend",
+                    "3-coding-sync": "backend",
                     "phase-4-testing": "code-blind-tester",
+                    "4-testing": "code-blind-tester",
                     "phase-5-deployment": "devops",
+                    "5-deployment": "devops",
+                    "4-production": "devops",
                     "phase-6-monitoring": "monitor",
+                    "6-monitoring": "monitor",
                 }
-                owner = phase_to_agent.get(phase, "unknown")
+                # Normalize: strip 'phase-' prefix if present, look up either form
+                owner = phase_to_agent.get(phase) or phase_to_agent.get(phase.lstrip("phase-")) or "unknown"
+                # v7.9: orphan detection — if phase is active but owner agent has no session
+                # AND no recent checkpoint, the fan-out never reached the agent (ghost phase).
+                if owner != "unknown" and not _is_agent_working(owner, gap_id):
+                    orphan_msg = (f"👻 ORPHAN-DETECTED: {gap_id} in {phase}, owner={owner} has no session + no recent checkpoint. "
+                                  f"Re-dispatching [FAN-OUT] to {owner}.")
+                    telegram_alert(orphan_msg)
+                    print(f"[probe] {orphan_msg}")
+                    try:
+                        # Re-dispatch the CODE-REQUEST to the owner
+                        send_to_agent(owner, f"[FAN-OUT] [CODE-REQUEST] {gap_id} {gap_id}",
+                                      f"gap_id: {gap_id}\niteration: 1\ntrace_id: trace_orphan_recover_{int(_t.time())}\n\n"
+                                      f"Orphan recovery: this gap's phase=3-coding but you never received a dispatch. "
+                                      f"Read /var/lib/karios/iteration-tracker/{gap_id}/ for context. "
+                                      f"Use get_minimal_context first. Implement + push to gitea + emit [CODING-COMPLETE].",
+                                      gap_id=gap_id, trace_id=f"trace_orphan_{gap_id}", priority="high")
+                        ps["stale_count"] = 0
+                        _save_probe_state(_PROGRESS_PROBE_STATE)
+                        continue
+                    except Exception as _oe:
+                        print(f"[probe] orphan re-dispatch failed: {_oe}")
                 if ps["stale_count"] == 1:
                     msg = (f"⚠ PROGRESS-STALL: {gap_id} in {phase} produced 0 new files in {PROGRESS_STALL_SECS // 60} min. "
                            f"Owner: {owner}. Watchdog will kill+retry on next stall ({PROGRESS_KILL_AFTER_STALLS - 1} more).")
@@ -3023,6 +3103,21 @@ def main():
 
     # FIX v5.1: Load state BEFORE recover_from_checkpoints so we know active_gaps
     state = load_state()
+    # v7.9: rehydrate incomplete active_gaps entries from gap metadata file (load_gap)
+    _rehydrated = 0
+    for _gid, _ge in state.get("active_gaps", {}).items():
+        if not _ge.get("phase") or not _ge.get("state"):
+            _g = load_gap(_gid) or {}
+            if _g.get("phase") and not _ge.get("phase"):
+                _ge["phase"] = _g["phase"]
+                _rehydrated += 1
+            if _g.get("iteration") and not _ge.get("iteration"):
+                _ge["iteration"] = _g["iteration"]
+            if not _ge.get("state") and _g.get("state"):
+                _ge["state"] = _g["state"]
+    if _rehydrated:
+        save_state(state)
+        print(f"[dispatcher] Rehydrated {_rehydrated} active_gaps entries from gap metadata")
     print(f"[dispatcher] State loaded: {len(state.get('active_gaps', {}))} active gaps")
 
     # FIX v5.1: Pass active_gaps so recover_from_checkpoints skips orphaned checkpoints
@@ -3174,6 +3269,12 @@ def main():
                 print(f"[dispatcher] ERROR processing message {msg_id}: {e}")
                 raise
             tracer.end_span(span)
+
+        # v7.8: progress probe — detect stuck active phases every cycle
+        try:
+            progress_probe_check()
+        except Exception as _ppe:
+            print(f"[dispatcher] progress_probe error: {_ppe}")
 
         # FIX v5.1: Delete processed messages from stream so they're not re-read next cycle.
         # XACK was for consumer groups (which we no longer use). XDEL removes from stream.

@@ -90,6 +90,13 @@ This is the timeline. For deep technical detail per version, read [knowledge/PIP
 - **`kairos-pipeline-operations` Hermes skill** published to GitHub + installed via `hermes skills tap add` + `install` — all 9 agents have authoritative reference, updateable via `hermes skills update`
 - **Real production deliverable**: VMware audit gap (REQ-VMWARE-AUDIT-001) cycled all 6 phases. Backend autonomously shipped PR `backend/REQ-VMWARE-AUDIT-001-2026-04-20` to gitea with **305 lines added, 36 deleted, 8 files, 2 unit tests** fixing 6 P0/P1 VMware bugs the architect identified (boot_mode value, root_disk_controller persistence, snapshot moref deletion, RDM distinction, guest IP detection, zone UEFI capability warning) + bonus API route prefix fix
 
+## v7.9 (2026-04-20 mid-morning) — systemic fixes after observing pipeline issues
+- **Orphan detection** in progress probe — if a gap's phase is active (e.g. `3-coding`) but the owner agent has no Hermes process AND no recent checkpoint write, the gap is "orphaned" (phase advanced but FAN-OUT never reached the agent). Probe auto-re-dispatches `[FAN-OUT] [CODE-REQUEST]` + Telegram `👻 ORPHAN-DETECTED`. Caught: ARCH-IT-018 was sitting in phase=3-coding for 100+ min with backend never dispatched.
+- **Probe state persistence** — `_PROGRESS_PROBE_STATE` now saved to `/var/lib/karios/orchestrator/progress-probe-state.json` and reloaded on startup. Without this, every dispatcher restart muted the probe for another 8+8 min stall window.
+- **state.json rehydrate on startup** — when `active_gaps[gid]` is missing `phase` or `iteration`, fill from the gap metadata file (`load_gap()`). Was causing "Resuming gap X: phase=None iter=None" log spam and confusing the probe (which read phase from active_gaps entry instead of metadata).
+- **`_is_agent_working(agent, gap_id)` helper** — checks `pgrep hermes chat --profile <agent>` AND checkpoint mtime within 5 min. Used by orphan detector.
+- **Probe normalizes both phase forms** — `phase_to_agent` map now includes both `phase-3-coding` and `3-coding` (similar for other phases). Was matching neither, so previous PROGRESS-STALL alert showed `Owner: unknown`.
+
 ## Honest grade
 
-**~9.7/10 as of 2026-04-20 dawn.** v7.7+v7.8 closed the bidirectional-Telegram gap and the PTY-watchdog regression. Remaining: hard tool-use enforcement (Hermes provider patch), BG-stub-no-op self-test, and the periodic prose-only Phase 4/5 cycles where synthesis at gates is still needed.
+**~9.8/10 as of 2026-04-20 mid-morning.** v7.9 fixed the most visible operational issue (gaps stuck in phase with no agent working). Remaining: hard tool-use enforcement (Hermes provider patch), BG-stub-no-op self-test, periodic prose-only Phase 4/5 cycles where synthesis at gates is still needed, watchdog-kill escalation after N retries (currently infinite retry).

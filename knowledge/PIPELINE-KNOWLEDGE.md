@@ -388,6 +388,26 @@ After v11/v12 completed, focus shifted to **two-way Telegram chat** (Sai talks t
 - **Phase 4 (E2E) and Phase 5 (deploy) still go prose-only** even with watchdog killing them. Multiple respawn cycles eventually hit the same prose pattern. Synthesizing JSON at the gate is still the workaround.
 - **`hermes pairing approve` flow not used** — would let users authenticate to specific Hermes profiles for direct chat. Currently we route everything via the custom listener.
 
+### v7.9 (2026-04-20 mid-morning) — systemic retrospective + fixes after observing IT-018 stuck
+
+After ARCH-IT-018 sat in `phase=3-coding` for 100+ minutes with backend never dispatched, dug into why. Five root causes + fixes:
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| Gap state split between `state.json.active_gaps[gid]` and `load_gap()` metadata | Phase/state stored in metadata file, not active_gaps. Different callers read different sources. `progress_probe_check` initially read `ge.get("phase")` (always empty); `check_stalled_gaps` correctly used `load_gap()` | Probe now uses `load_gap()` first, falls back to active_gaps. `state.json` rehydrated on startup from metadata if active_gaps entry is incomplete. |
+| Phase advanced without dispatch ("ghost transition") | Some handler set `phase=3-coding` but FAN-OUT to backend never happened. IT-018 sat with no work. | **Orphan detection** in progress probe: `_is_agent_working(agent, gap_id)` checks `pgrep hermes chat --profile <agent>` + checkpoint mtime. If no session + no recent checkpoint AND phase is active → auto-re-dispatch `[FAN-OUT] [CODE-REQUEST]` + Telegram `👻 ORPHAN-DETECTED`. |
+| Probe state lost on every dispatcher restart | `_PROGRESS_PROBE_STATE = {}` reset to empty on import. Every patch I shipped (~10 restarts in 2 hours) muted the probe for another 8+8 min stall window. | Persist probe state to `/var/lib/karios/orchestrator/progress-probe-state.json`, reload on startup, save on every check update. |
+| `phase_to_agent` map didn't normalize both phase forms | Map had `phase-3-coding`, but actual phase string is `3-coding` (no `phase-` prefix in metadata). PROGRESS-STALL fired with `Owner: unknown` because lookup missed. | Map includes both forms (`phase-3-coding` AND `3-coding`); fallback strips `phase-` prefix. Owner now correctly identified for kill targeting. |
+| State rehydrate on dispatcher restart | `load_state()` returned active_gaps entries with empty phase/state for gaps where the entry was created via `[REQUIREMENT]` flow but never updated by phase handlers. "Resuming gap X: phase=None iter=None" log spam. Probe + handlers couldn't act. | Startup rehydrate: for each `active_gaps[gid]` with missing phase/state/iteration, fill from `load_gap(gid)` metadata. Persist via `save_state()`. |
+
+### v7.9 lessons learned
+
+- **Single source of truth for gap state is critical.** The split between `state.json.active_gaps` and per-gap metadata file caused multiple bugs (probe couldn't see phase, orphan detector silent, log spam). Either consolidate to one store OR enforce write-through on every transition. Currently fixed via rehydrate + load_gap() reads, but the proper fix is consolidation.
+- **Persist probe state across restarts.** Any operational tool whose state is "time since last X" MUST persist that state, otherwise restarts mute it. We had probe state at `_PROGRESS_PROBE_STATE = {}` (in-memory only) and every patch cycle wiped it.
+- **"Active phase but no agent working" is a real failure mode** worth its own detector. The pipeline can ghost-transition into a phase without actually dispatching to the owner agent (rare but lethal — IT-018 sat 100+ min). Orphan detector catches this in ~16 min worst case (8 min stall window × 2).
+- **Phase strings have multiple forms** (`phase-3-coding` vs `3-coding`); ANY map keyed by phase must include both OR normalize on read. Same lesson learned in v7.5 for COMPLETE handler — re-encountered in v7.9 for probe owner lookup.
+- **`pgrep` + checkpoint mtime is the cheap "is this agent doing work?" check.** Don't trust queue depth alone — agent-worker may be polling empty stream while the agent is supposed to be running but isn't.
+
 ### Real production deliverable from this session: VMware audit PR
 
 **Branch**: `backend/REQ-VMWARE-AUDIT-001-2026-04-20` on `gitea.karios.ai/KariosD/karios-migration`
