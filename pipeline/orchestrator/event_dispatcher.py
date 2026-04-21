@@ -3016,6 +3016,12 @@ def parse_message(msg_id: str, data: dict):
             _v741_state = _v741_ge.get("state")
             if _v741_state in ("completed", "closed", "cancelled", "escalated"):
                 print(f"[dispatcher] v7.44 DROP {subject[:40]} for {_v744_check_gap}: state={_v741_state} (terminal — ghost message ignored)")
+                # v7.68: kill orphan Hermes so it stops flooding ghost traffic
+                try:
+                    if sender and _kill_agent_hermes(sender):
+                        print(f"[dispatcher] v7.68: killed orphan {sender} Hermes (v7.44 ghost)")
+                except Exception:
+                    pass
                 return
         except Exception as _v741_e:
             print(f"[dispatcher] v7.44 state check failed (proceeding): {_v741_e}")
@@ -3333,6 +3339,12 @@ def parse_message(msg_id: str, data: dict):
                 _v739_ge = _v739_st.get("active_gaps", {}).get(gap_id, {})
                 if _v739_ge.get("state") in ("completed", "closed", "cancelled", "escalated"):
                     print(f"[dispatcher] v7.39 DROP [COMPLETE] for {gap_id}: state={_v739_ge.get('state')} (terminal — ignoring ghost work)")
+                    # v7.68: kill orphan Hermes so it stops flooding ghost traffic
+                    try:
+                        if sender and _kill_agent_hermes(sender):
+                            print(f"[dispatcher] v7.68: killed orphan {sender} Hermes (v7.39 ghost)")
+                    except Exception:
+                        pass
                     return
             except Exception as _v739_e:
                 print(f"[dispatcher] v7.39 state check failed (proceeding): {_v739_e}")
