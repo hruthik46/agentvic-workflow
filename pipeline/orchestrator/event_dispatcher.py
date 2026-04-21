@@ -3369,17 +3369,27 @@ def parse_message(msg_id: str, data: dict):
                     print(f"[dispatcher] v7.21-C check failed (falling through to API-SYNC): {_v721_e}")
 
                 if not _v721_skip_apisync:
-                    # Coding complete → trigger API-SYNC gate (also accept arriving from 2-* if state lagged)
-                    gap_data = load_gap(gap_id) or {}
-                    gap_data["iteration_status"] = "awaiting_sync"
-                    gap_data["phase"] = "phase-3-coding"
-                    save_gap(gap_id, gap_data)
-                    send_to_agent("backend",
-                                f"[API-SYNC] {gap_id} — ready for API contract verification",
-                                f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
-                                "Verify the API contract against the implementation. "
-                                "Report back with [CODING-COMPLETE] or [CODING-ERROR].",
-                                gap_id=gap_id, trace_id=trace_id)
+                    # v7.53: only fire API-SYNC if the [COMPLETE] body shows actual code shipped
+                    # (commit_sha=<7-40 hex>). Bare [COMPLETE] phase=3-coding is just session-end
+                    # notification from agent-worker — without commit it is NOT a real completion.
+                    # Frontend was emitting bare COMPLETE in a loop, each triggering API-SYNC,
+                    # bloating backend queue to 7+. v7.53 acknowledges bare COMPLETE without dispatch.
+                    import re as _v753_re
+                    _v753_has_commit = bool(_v753_re.search(r"commit_sha=[0-9a-f]{7,40}\b", body or ""))
+                    if not _v753_has_commit:
+                        print(f"[dispatcher] v7.53 [COMPLETE] phase=3-coding from {sender} for {gap_id} — no commit_sha in body, acknowledged with no API-SYNC dispatch (waiting for [CODING-COMPLETE] with commit)")
+                    else:
+                        # Coding complete → trigger API-SYNC gate (also accept arriving from 2-* if state lagged)
+                        gap_data = load_gap(gap_id) or {}
+                        gap_data["iteration_status"] = "awaiting_sync"
+                        gap_data["phase"] = "phase-3-coding"
+                        save_gap(gap_id, gap_data)
+                        send_to_agent("backend",
+                                    f"[API-SYNC] {gap_id} — ready for API contract verification",
+                                    f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
+                                    "Verify the API contract against the implementation. "
+                                    "Report back with [CODING-COMPLETE] or [CODING-ERROR].",
+                                    gap_id=gap_id, trace_id=trace_id)
             elif n_phase in ("3-coding-sync", "3-coding-testing") or n_phase.startswith("3-coding"):
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
                 # v7.12: E2E build_prompt — 7 dimensions + VMware intent
