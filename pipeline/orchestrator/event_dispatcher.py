@@ -2878,7 +2878,12 @@ def progress_probe_check():
             cur_size = _gap_iter_tracker_size(gap_id)
             ps = _PROGRESS_PROBE_STATE.setdefault(gap_id, {"last_check_ts": now, "last_size": cur_size, "stale_count": 0})
             elapsed = now - ps["last_check_ts"]
-            if elapsed < PROGRESS_STALL_SECS:
+            # v7.61: phase-specific stall timeout — 4-testing/4-production need >30 min
+            _phase_stall_secs = {
+                "4-testing": 1800, "phase-4-testing": 1800,
+                "4-production": 1800, "phase-4-production": 1800,
+            }.get(phase, PROGRESS_STALL_SECS)
+            if elapsed < _phase_stall_secs:
                 continue  # not yet time to re-evaluate
             grew = cur_size > ps["last_size"]
             if grew:
