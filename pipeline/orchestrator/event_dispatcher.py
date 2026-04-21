@@ -3391,6 +3391,14 @@ def parse_message(msg_id: str, data: dict):
                                     "Report back with [CODING-COMPLETE] or [CODING-ERROR].",
                                     gap_id=gap_id, trace_id=trace_id)
             elif n_phase in ("3-coding-sync", "3-coding-testing") or n_phase.startswith("3-coding"):
+                # v7.54: do not advance to Phase 4 testing if no commit_sha in body. Bare [COMPLETE]
+                # phase=3-coding-sync from a hung or confused agent is not a real "API sync done"
+                # signal. Pipeline should wait for backend to actually ship code (commit_sha=)
+                # before testers run.
+                import re as _v754_re
+                if not _v754_re.search(r"commit_sha=[0-9a-f]{7,40}\b", body or ""):
+                    print(f"[dispatcher] v7.54 [COMPLETE] {n_phase} from {sender} for {gap_id} — no commit_sha in body, NOT advancing to Phase 4 testing (waiting for [CODING-COMPLETE])")
+                    return
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
                 # v7.12: E2E build_prompt — 7 dimensions + VMware intent
                 if _PROMPT_BUILDER:
