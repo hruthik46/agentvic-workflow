@@ -870,6 +870,7 @@ def telegram_alert(message: str):
 
 # ── Fan-Out / Fan-In Pattern ─────────────────────────────────────────────────
 FAN_STATE_FILE = ORCHESTRATOR_DIR / "fan-state.json"
+_GAP_ID_RE = re.compile(r'^[A-Z]+-[A-Z]+-\d+$')  # v7.74: gap_id format guard
 
 def notify_phase_transition(gap_id: str, from_agent: str, to_agent: str,
                               event: str, rating=None, score_max=10, summary: str = ""):
@@ -1115,6 +1116,9 @@ def load_gap(gap_id: str) -> dict:
     Without this, [COMPLETE] handler always saw current_phase='unknown' and refused
     to transition.
     """
+    if not _GAP_ID_RE.match(gap_id or ""):  # v7.74: phantom-directory prevention
+        print(f"[dispatcher] WARN load_gap: invalid gap_id={repr(gap_id)[:80]} — returning empty dict")
+        return {}
     gap_dir = IT_DIR / gap_id
     metadata_file = gap_dir / "metadata.json"
     if metadata_file.exists():
@@ -1143,6 +1147,9 @@ def load_gap(gap_id: str) -> dict:
     return data
 
 def save_gap(gap_id: str, data: dict):
+    if not _GAP_ID_RE.match(gap_id or ""):  # v7.74: phantom-directory prevention
+        print(f"[dispatcher] ERROR save_gap: invalid gap_id={repr(gap_id)[:80]} — refusing (phantom dir prevention)")
+        return
     gap_dir = IT_DIR / gap_id
     gap_dir.mkdir(parents=True, exist_ok=True)
     metadata_file = gap_dir / "metadata.json"
@@ -3228,9 +3235,9 @@ def parse_message(msg_id: str, data: dict):
 
     # ── Research phase complete ───────────────────────────────────────────
     if subject.startswith("[RESEARCH-COMPLETE]"):
-        # Format: "[RESEARCH-COMPLETE] GAP-ID: body" → extract GAP-ID (before ":")
+        # v7.74: use whitespace split — colon in body was grabbing description into gid
         parts = subject.split("]")
-        gid = parts[1].strip().split(":")[0].strip() if len(parts) > 1 else subject
+        gid = parts[1].strip().split()[0] if len(parts) > 1 else subject
         handle_research_complete(gid, body, trace_id=trace_id)
         return
 
@@ -3475,7 +3482,15 @@ def parse_message(msg_id: str, data: dict):
                     import re as _v753_re
                     _v753_has_commit = bool(_v753_re.search(r"commit_sha=[0-9a-f]{7,40}\b", (body or "") + " " + (subject or "")))  # v7.60: also check subject
                     if not _v753_has_commit:
-                        print(f"[dispatcher] v7.53 [COMPLETE] phase=3-coding from {sender} for {gap_id} — no commit_sha in body, acknowledged with no API-SYNC dispatch (waiting for [CODING-COMPLETE] with commit)")
+                        # v7.75: check stored commit_shas — agent may have sent [CODING-COMPLETE] already
+                        _v775_stored = (load_gap(gap_id) or {}).get("commit_shas", {})
+                        if sender in _v775_stored:
+                            print(f"[dispatcher] v7.75: {sender} has stored sha={_v775_stored[sender]} — treating bare [COMPLETE] as [CODING-COMPLETE]")
+                            _v753_has_commit = True
+                        else:
+                            if _v775_stored:
+                                telegram_alert(f"⚠ {gap_id}: {sender} sent bare [COMPLETE] phase=3-coding — no commit. Other stored: {_v775_stored}. Fix: HERMES_AGENT={sender} agent send orchestrator \"[CODING-COMPLETE] {gap_id} commit_sha=HASH\"")
+                            print(f"[dispatcher] v7.53 [COMPLETE] phase=3-coding from {sender} for {gap_id} — no commit_sha in body, acknowledged with no API-SYNC dispatch (waiting for [CODING-COMPLETE] with commit)")
                     else:
                         # Coding complete → trigger API-SYNC gate (also accept arriving from 2-* if state lagged)
                         gap_data = load_gap(gap_id) or {}
@@ -3660,6 +3675,11 @@ def parse_message(msg_id: str, data: dict):
         bm = _re.search(r"gap_id[=:\s]+(\S+)", body)
         if bm and (not gid or "=" in gid):
             gid = bm.group(1).strip()
+        # v7.74: reject unknown sender — HERMES_AGENT env var not set on agent
+        if sender in ("unknown", "") or not sender:
+            print(f"[dispatcher] v7.74 DROP [CODING-COMPLETE] from unknown sender for {gid} — HERMES_AGENT not set on agent")
+            telegram_alert(f"⚠ {gid}: [CODING-COMPLETE] from unknown sender — agent missing HERMES_AGENT env var. Fix: set HERMES_AGENT=backend or HERMES_AGENT=frontend in agent systemd unit.")
+            return
         iter_idx = tokens.index("iteration") if "iteration" in tokens else -1
         iteration = int(tokens[iter_idx + 1]) if iter_idx != -1 and iter_idx + 1 < len(tokens) else 1
         # Also pull iteration= from body
@@ -3677,7 +3697,24 @@ def parse_message(msg_id: str, data: dict):
             import re as _re
             # v7.46: accept short (7+) or full (40) SHA. Agents commonly emit commit_sha=a59a2fc from .
             has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{7,40}", (body or "") + " " + (subject or "")))  # v7.60: also check subject + fix stray backspace
-            if crg_calls == 0 and not has_real_commit:
+            # v7.72: NO-OP scope detection — frontend (or backend) may have no work for backend-only (or frontend-only) gaps
+            _is_scope_noop = False
+            _noop_in_msg = "NO-OP" in (body or "").upper() or "NO-OP" in (subject or "").upper()
+            if _noop_in_msg and crg_calls == 0 and not has_real_commit:
+                _iter_n = gap_data.get("iteration", 1) or 1
+                _arch_md = IT_DIR / gid / "phase-2-arch-loop" / f"iteration-{_iter_n}" / "architecture.md"
+                _arch_text = _arch_md.read_text().lower() if _arch_md.exists() else ""
+                if sender in ("frontend", "frontend-worker"):
+                    _fe_markers = {"react", "karios-web", "jsx", "tsx", "usestate", "useeffect", "component", ".tsx", ".jsx"}
+                    if not any(m in _arch_text for m in _fe_markers):
+                        _is_scope_noop = True
+                        print(f"[dispatcher] v7.72: {sender} NO-OP accepted for {gid} — no React/UI markers in architecture.md")
+                elif sender in ("backend", "backend-worker"):
+                    _be_markers = {"server.go", "handler", "gin", "route", "api endpoint", "go build"}
+                    if not any(m in _arch_text for m in _be_markers):
+                        _is_scope_noop = True
+                        print(f"[dispatcher] v7.72: {sender} NO-OP accepted for {gid} — no backend markers in architecture.md")
+            if crg_calls == 0 and not has_real_commit and not _is_scope_noop:
                 # No proof of work → refuse + retry (orig v7.6 behavior)
                 print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
                 stream_publish(
@@ -3734,8 +3771,9 @@ def parse_message(msg_id: str, data: dict):
 
     # ── API sync confirmation ─────────────────────────────────────────────
     if subject.startswith("[API-SYNC]"):
-        # Format: "[API-SYNC] GAP-ID: body" → extract GAP-ID (before ":")
-        gid = subject.split("]")[1].strip().split(":")[0].strip()
+        # v7.73 FIX: extract first whitespace-token after "]". Old colon-split included description text as gid.
+        _apisync_rest = subject.split("]")[1].strip() if "]" in subject else subject
+        gid = _apisync_rest.split()[0] if _apisync_rest else ""
         agent = sender
         gap_data = load_gap(gid)
         # v7.64: atomic read-modify-write to avoid race when both agents confirm simultaneously
@@ -4054,15 +4092,17 @@ def parse_message(msg_id: str, data: dict):
                                     "PROD-DEPLOYED", summary=body[:140])
         except Exception:
             pass
-        # Format: "[PROD-DEPLOYED] GAP-ID: body" → extract GAP-ID (before ":")
-        gid = subject.split("]")[1].strip().split(":")[0].strip()
+        # v7.74: use whitespace split — colon in body was grabbing description into gid
+        _pd_rest = subject.split("]")[1].strip() if "]" in subject else subject
+        gid = _pd_rest.split()[0] if _pd_rest else ""
         handle_production_deployed(gid, trace_id=trace_id)
         return
 
     # ── Escalation ────────────────────────────────────────────────────────
     if subject.startswith("[ESCALATE]"):
-        # Format: "[ESCALATE] GAP-ID: reason" → extract GAP-ID (before ":")
-        gid = subject.split("]")[1].strip().split(":")[0].strip()
+        # v7.74: use whitespace split — colon in body was grabbing description into gid
+        _esc_rest = subject.split("]")[1].strip() if "]" in subject else subject
+        gid = _esc_rest.split()[0] if _esc_rest else ""
         telegram_alert(f"🚨 ESCALATION for {gid}: {body[:200]}")
         return
 
@@ -4123,6 +4163,17 @@ def parse_message(msg_id: str, data: dict):
             print(f"[dispatcher] MONITORING-COMPLETE handler error: {type(_mc_e).__name__}: {_mc_e}")
         return
 
+    # v7.74: route tester non-standard "TEST-RUN COMPLETE: GAP-ID iteration N | SCORE: N/N" subjects
+    _trc_m = re.search(r"(ARCH-IT-\d+|REQ-\d+|TEST-FLOW-[A-Z0-9]+)\s+iteration\s+(\d+)", subject or "", re.IGNORECASE)
+    if _trc_m and subject and any(k in subject.upper() for k in ("TEST", "SCORE", "E2E", "BLIND")):
+        _trc_gid = _trc_m.group(1)
+        _trc_iter = int(_trc_m.group(2))
+        _trc_sm = re.search(r"SCORE:\s*(\d+)/(\d+)", subject, re.IGNORECASE)
+        _trc_rating = int(_trc_sm.group(1)) if _trc_sm else 7
+        _trc_rec = "APPROVE" if "APPROVE" in (subject or "").upper() else "REJECT"
+        print(f"[dispatcher] v7.74: routing non-standard test subject → E2E handler for {_trc_gid} iter {_trc_iter} rating={_trc_rating} rec={_trc_rec}")
+        handle_e2e_results(_trc_gid, _trc_iter, _trc_rating, body or subject, _trc_rec, trace_id=trace_id)
+        return
     print(f"[dispatcher] Unhandled message: {subject} (trace={trace_id})")
 
 # ── Stalled Gap Detection ─────────────────────────────────────────────────────
