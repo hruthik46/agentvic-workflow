@@ -48,6 +48,37 @@ try:
 except ImportError as _ie:
     print(f'[dispatcher] WARN: message_schemas not loaded ({_ie}); validation disabled')
     _SCHEMA_VALIDATION = False
+
+# v7.18: Stream backlog prune + Langfuse trace integration
+sys.path.insert(0, "/var/lib/karios/orchestrator/patches")
+sys.path.insert(0, "/root/agentic-workflow/pipeline/integrations/3-langfuse")
+try:
+    from stream_prune import prune_stale_streams as _v718_prune_streams
+except Exception as _e:
+    _v718_prune_streams = None
+    print(f"[dispatcher] v7.18 stream-prune unavailable: {_e}")
+# v7.18.3: Inline Langfuse trace calls (monkey-patch failed on circular import)
+try:
+    sys.path.insert(0, "/root/agentic-workflow/pipeline/integrations/3-langfuse")
+    from kairos_langfuse_wrapper import init_langfuse as _v718_lf_init, trace_dispatch as _v718_lf_dispatch, trace_phase_event as _v718_lf_phase
+    _V718_LF_OK = _v718_lf_init()
+except Exception as _e:
+    _V718_LF_OK = False
+    print(f"[dispatcher] v7.18 langfuse inline unavailable: {_e}")
+    def _v718_lf_dispatch(*a, **kw):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            yield None
+        return _noop()
+    def _v718_lf_phase(*a, **kw):
+        pass
+
+try:
+    from subject_normalizer import maybe_normalize_complete as _v718_normalize
+except Exception as _e:
+    _v718_normalize = None
+    print(f"[dispatcher] v7.18 subject-normalizer unavailable: {_e}")
 import redis
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -550,10 +581,109 @@ def load_error_taxonomy() -> dict:
     return {}
 
 def classify_error(error_text: str) -> tuple:
-    """Classify an error into the taxonomy."""
+    """Classify an error into the taxonomy.
+
+    v7.23-A: Also handles structured critical_issues format like
+    "{'category': 'syntax-error', ...}" by mapping common hyphenated
+    categories to taxonomy categories.
+    """
     taxonomy = load_error_taxonomy()
     categories = taxonomy.get("categories", {})
     error_lower = error_text.lower()
+
+    # v7.23-A + v7.23.1: hyphenated category map (covers what testers actually emit)
+    hyphen_map = {
+        # coding errors
+        "syntax-error":            "coding",
+        "compilation-error":       "coding",
+        "build-failure":           "coding",
+        "build-error":             "coding",
+        "undefined-reference":     "coding",
+        "undefined-symbol":        "coding",
+        "type-mismatch":           "coding",
+        "wrong-import":            "coding",
+        "missing-dependency":      "coding",
+        "logic-bug":               "coding",
+        # api contract
+        "api-contract-violation":  "api_contract_violation",
+        "wrong-status-code":       "api_contract_violation",
+        "missing-field":           "api_contract_violation",
+        "wrong-field-type":        "api_contract_violation",
+        "field-name-mismatch":     "api_contract_violation",
+        # infra / runtime
+        "no-api-server":           "infra",
+        "service-unreachable":     "infra",
+        "service-unavailable":     "infra",
+        "service-down":            "infra",
+        "service-failed":          "infra",
+        "service-crashed":         "infra",
+        "service-restart-loop":    "infra",
+        "port-not-listening":      "infra",
+        "port-blocked":            "infra",
+        "dns-failure":             "infra",
+        "network-unreachable":     "infra",
+        "database-error":          "infra",
+        "database-unreachable":    "infra",
+        "env-misconfiguration":    "infra",
+        "config-error":            "infra",
+        "missing-env-var":         "infra",
+        "malformed-env":           "infra",
+        # deployment
+        "deployment-failure":      "deployment",
+        "rollback-required":       "deployment",
+        "image-pull-error":        "deployment",
+        # concurrency / safety
+        "race-condition":          "race_condition",
+        "null-pointer":            "null_pointer",
+        "off-by-one":              "off_by_one",
+        "memory-leak":             "memory_leak",
+        "timeout":                 "timeout_deadlock",
+        "deadlock":                "timeout_deadlock",
+        "state-corruption":        "state_corruption",
+        "resource-exhaustion":     "resource_exhaustion",
+        "data-loss-risk":          "data_loss_risk",
+        "rollback-plan-missing":   "rollback_plan_missing",
+    }
+
+    # v7.23.1: extract 'category' field via regex from structured critical_issues
+    # Input often looks like "{'category': 'service-unavailable', ...}" — pull out the value
+    import re as _v7231_re
+    _v7231_cats_extracted = _v7231_re.findall(r"'category'\s*:\s*'([a-z0-9\-_]+)'", error_lower)
+    _v7231_cats_extracted += _v7231_re.findall(r'"category"\s*:\s*"([a-z0-9\-_]+)"', error_lower)
+    for _v7231_c in _v7231_cats_extracted:
+        if _v7231_c in hyphen_map:
+            tax_cat = hyphen_map[_v7231_c]
+            cat_data = categories.get(tax_cat, categories.get("unknown", {}))
+            return tax_cat, cat_data
+        # heuristic catch-all: hyphenated cat strings starting with these prefixes
+        for _v7231_pref, _v7231_tax in [("service-", "infra"), ("port-", "infra"),
+                                          ("database-", "infra"), ("env-", "infra"),
+                                          ("network-", "infra"), ("dns-", "infra"),
+                                          ("config-", "infra"), ("missing-env", "infra"),
+                                          ("syntax-", "coding"), ("build-", "coding"),
+                                          ("compile-", "coding"), ("type-", "coding"),
+                                          ("undefined-", "coding"), ("wrong-status", "api_contract_violation"),
+                                          ("missing-field", "api_contract_violation"),
+                                          ("api-", "api_contract_violation"),
+                                          ("deployment-", "deployment"),
+                                          ("rollback-", "deployment"),
+                                          ("race-", "race_condition"),
+                                          ("null-", "null_pointer"),
+                                          ("memory-", "memory_leak"),
+                                          ("timeout", "timeout_deadlock"),
+                                          ("deadlock", "timeout_deadlock"),
+                                          ("data-loss", "data_loss_risk")]:
+            if _v7231_c.startswith(_v7231_pref):
+                cat_data = categories.get(_v7231_tax, categories.get("unknown", {}))
+                return _v7231_tax, cat_data
+
+    # Then try hyphenated forms (covers structured critical_issues category strings)
+    for hyphen_cat, tax_cat in hyphen_map.items():
+        if hyphen_cat in error_lower or hyphen_cat.replace("-", "_") in error_lower:
+            cat_data = categories.get(tax_cat, categories.get("unknown", {}))
+            return tax_cat, cat_data
+
+    # Fall back to original underscore + space matching
     for cat_name, cat_data in categories.items():
         for example in cat_data.get("examples", []):
             if example.replace("_", " ") in error_lower or example in error_lower:
@@ -746,6 +876,12 @@ def notify_phase_transition(gap_id: str, from_agent: str, to_agent: str,
     """v7.3: Loud Telegram notification when a phase transitions or a blind-tester scores.
     User explicitly asked: 'I want to know that the blind-test agent reviewed, this is the
     score, now handing back to architect/coder.'"""
+    # v7.18.3: inline Langfuse phase-event trace
+    try:
+        if _V718_LF_OK:
+            _v718_lf_phase(gap_id, event, from_agent, to_agent or "", rating=rating, summary=summary)
+    except Exception as _lfe:
+        pass
     icons = {"ARCH-COMPLETE": "📐", "ARCH-REVIEWED": "🔍", "CODING-COMPLETE": "💾",
              "FAN-IN-COMPLETE": "🔗", "API-SYNC": "🤝", "E2E-RESULTS": "🧪",
              "STAGING-DEPLOYED": "📦", "PROD-DEPLOYED": "🚀", "MONITORING-COMPLETE": "📊",
@@ -1238,6 +1374,86 @@ def cleanup_orphaned_keys() -> int:
     
     return cleaned
 
+
+
+def format_critical_issues_for_revise(critical_issues, kind="code"):
+    """v7.32: build a rich, SWE-Bench-style critical-issues block for fix-agent prompts.
+
+    Per SWE-Bench best practices (83.4% bug-fix rate agents): include
+    root_cause, reproduction, file_line, evidence, suggested_fix,
+    acceptance_criteria. The fix-agent then has a complete spec, not just
+    an error message.
+
+    kind: "code" (for backend) or "arch" (for architect)
+    """
+    if not isinstance(critical_issues, list):
+        return "(no structured critical_issues)"
+    lines = []
+    for i, issue in enumerate(critical_issues[:15], 1):
+        if not isinstance(issue, dict):
+            lines.append(f"{i}. {str(issue)[:300]}")
+            continue
+        sev = issue.get("severity", "?")
+        cat = issue.get("category", "?")
+        dim = issue.get("dimension", "?")
+        desc = issue.get("description", "")
+        loc = issue.get("file_line") or issue.get("doc_line") or "(no location)"
+        cause = issue.get("root_cause", "(reviewer did not provide root cause)")
+        repro = issue.get("reproduction", "")
+        evid = issue.get("evidence", "")
+        sug = issue.get("suggested_fix") or issue.get("suggested_redesign") or "(reviewer did not suggest a fix)"
+        accept = issue.get("acceptance_criteria", "(no explicit acceptance criteria)")
+        prior = issue.get("prior_attempts", [])
+
+        lines.append(f"\n--- ISSUE #{i} [{sev}] [{cat}] dim={dim} ---")
+        lines.append(f"LOCATION: {loc}")
+        lines.append(f"WHAT: {desc}")
+        lines.append(f"WHY (root cause): {cause}")
+        if repro:
+            lines.append(f"REPRODUCE: {repro}")
+        if evid:
+            evid_short = str(evid)[:500]
+            lines.append(f"EVIDENCE: {evid_short}")
+        lines.append(f"SUGGESTED FIX: {sug}")
+        lines.append(f"ACCEPTANCE: {accept}")
+        if prior:
+            for p in prior[:3]:
+                lines.append(f"PRIOR ATTEMPT: {str(p)[:200]}")
+    return "\n".join(lines)
+
+
+def escalate_to_human(gap_id: str, subject: str, body: str, rating=None, iteration=None):
+    """v7.29: proper escalation — Telegram alert + state.json freeze.
+    Replaces broken send_to_agent('sai', ...) which fails because 'sai' has no stream.
+    """
+    import json as _v729_j
+    from pathlib import Path as _v729_P
+    # Telegram alert with full body (truncated to 4096 chars Telegram limit)
+    try:
+        msg = f"\U0001F6A8 ESCALATE — {gap_id}\n{subject}\n\n{body[:3500]}"
+        telegram_alert(msg)
+        print(f"[dispatcher] v7.29 escalate_to_human: Telegram sent for {gap_id}")
+    except Exception as _v729_e:
+        print(f"[dispatcher] v7.29 telegram failed: {_v729_e}")
+    # Freeze state.json so future dispatcher restarts skip this gap
+    try:
+        sp = _v729_P("/var/lib/karios/orchestrator/state.json")
+        st = _v729_j.loads(sp.read_text())
+        ag = st.setdefault("active_gaps", {}).setdefault(gap_id, {})
+        ag["state"] = "escalated"
+        ag["phase"] = "escalated"
+        if iteration is not None:
+            ag["iteration"] = iteration
+        if rating is not None:
+            ag["last_rating"] = rating
+        ag["escalated_at"] = current_ts()
+        ag["escalation_reason"] = subject
+        sp.write_text(_v729_j.dumps(st, indent=2))
+        print(f"[dispatcher] v7.29 escalate_to_human: state.json frozen for {gap_id}")
+    except Exception as _v729_e:
+        print(f"[dispatcher] v7.29 state freeze failed: {_v729_e}")
+
+
 # ── Send to Agent (Streams-based) ─────────────────────────────────────────────
 def send_to_agent(agent: str, subject: str, body: str,
                   task_id: str = None, gap_id: str = None,
@@ -1252,6 +1468,25 @@ def send_to_agent(agent: str, subject: str, body: str,
     FIX v5.4: Semantic Memory inject_context() prepended to body before dispatch.
     """
     tid = trace_id or new_trace_id(gap_id, "orchestrator", subject[:20])
+    # v7.24-3: write last-dispatch marker file for RECOVER stale-skip guard
+    try:
+        if gap_id:
+            _v724_3_dir = Path("/var/lib/karios/agent-memory")
+            _v724_3_dir.mkdir(parents=True, exist_ok=True)
+            (_v724_3_dir / f"{gap_id}_last_dispatch.ts").touch()
+    except Exception:
+        pass
+    # v7.18.3: inline Langfuse dispatch trace
+    _v718_trace_cm = None
+    try:
+        if _V718_LF_OK:
+            _v718_trace_cm = _v718_lf_dispatch(gap_id or "no-gap", agent, subject,
+                                                trace_id=tid,
+                                                metadata={"priority": priority,
+                                                           "body_chars": len(body or "")})
+            _v718_trace_cm.__enter__()
+    except Exception:
+        _v718_trace_cm = None
     # FIX v5.4: Inject semantic memory context before sending to agent
     if semantic_memory is not None and gap_id:
         try:
@@ -1680,10 +1915,11 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                            "issues": critical_issues, "routing": routing,
                            "trace_id": tid})
         telegram_alert(f"🚨 *{gap_id}*: Architecture loop rating {rating}/10 < {ROUTING_ESCALATE_NOW} — immediate escalation.")
-        send_to_agent("sai", f"[ESCALATE] {gap_id} — Architecture rating too low",
-                      f"Gap {gap_id}: Architecture rating {rating}/10 after {iteration} iteration(s).\n"
-                      f"Threshold: {ROUTING_ESCALATE_NOW}/10.\n"
-                      f"Critical issues:\n" + "\n".join(f"- {i}" for i in critical_issues))
+        escalate_to_human(gap_id, "Architecture rating too low",
+                          f"Architecture rating {rating}/10 after {iteration} iteration(s).\n"
+                          f"Threshold: {ROUTING_ESCALATE_NOW}/10.\n"
+                          f"Critical issues:\n" + "\n".join(f"- {i}" for i in critical_issues),
+                          rating=rating, iteration=iteration)
         print(f"[dispatcher] Gap {gap_id} IMMEDIATE ESCALATION (rating {rating}/10)")
 
     elif routing["route"] == "fast_track":
@@ -1712,10 +1948,11 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                                "issues": critical_issues, "self_diagnosis": strategy,
                                "trace_id": tid})
             telegram_alert(f"🚨 *{gap_id}*: Architecture loop EXHAUSTED ({rating}/10, {iteration} iter). {strategy}")
-            send_to_agent("sai", f"[ESCALATE] {gap_id} — Architecture exhausted",
-                          f"Gap {gap_id}: {strategy}\n"
-                          f"Final rating: {rating}/10.\n"
-                          f"Issues:\n" + "\n".join(f"- {i}" for i in critical_issues))
+            escalate_to_human(gap_id, "Architecture exhausted",
+                              f"{strategy}\n"
+                              f"Final rating: {rating}/10.\n"
+                              f"Issues:\n" + "\n".join(f"- {i}" for i in critical_issues),
+                              rating=rating, iteration=iteration)
             print(f"[dispatcher] Gap {gap_id} ESCALATED: {strategy}")
         else:
             next_iter = iteration + 1
@@ -1901,10 +2138,11 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                            "issues": critical_issues, "routing": routing,
                            "trace_id": tid})
         telegram_alert(f"🚨 *{gap_id}*: E2E rating {rating}/10 < {ROUTING_ESCALATE_NOW} — immediate escalation.")
-        send_to_agent("sai", f"[ESCALATE] {gap_id} — E2E rating too low",
-                      f"Gap {gap_id}: E2E rating {rating}/10 after {iteration} iteration(s).\n"
-                      f"Threshold: {ROUTING_ESCALATE_NOW}/10.\n"
-                      f"Issues:\n" + "\n".join(f"- {i}" for i in critical_issues))
+        escalate_to_human(gap_id, "E2E rating too low",
+                          f"E2E rating {rating}/10 after {iteration} iteration(s).\n"
+                          f"Threshold: {ROUTING_ESCALATE_NOW}/10.\n"
+                          f"Issues:\n" + "\n".join(f"- {i}" for i in critical_issues),
+                          rating=rating, iteration=iteration)
         print(f"[dispatcher] Gap {gap_id} IMMEDIATE ESCALATION (E2E rating {rating}/10)")
 
     elif routing["route"] == "fast_track":
@@ -1917,6 +2155,79 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
         combined_issues = " ".join(str(i) if not isinstance(i, str) else i for i in critical_issues)  # v7.15: coerce dict items
+
+        # v7.27-D: HARD K_MAX ESCALATION at iteration > 8
+        if iteration >= 8:
+            try:
+                _v727d_state_path = Path("/var/lib/karios/orchestrator/state.json")
+                _v727d_state = json.loads(_v727d_state_path.read_text())
+                _v727d_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
+                _v727d_state["active_gaps"][gap_id]["iteration"] = iteration
+                _v727d_state["active_gaps"][gap_id]["phase"] = "escalated"
+                _v727d_state_path.write_text(json.dumps(_v727d_state, indent=2))
+                print(f"[dispatcher] v7.27-D HARD ESCALATE {gap_id} iter={iteration}/8 — state frozen")
+            except Exception as _v727d_e:
+                print(f"[dispatcher] v7.27-D state freeze failed: {_v727d_e}")
+            try:
+                telegram_alert(f"🚨 *{gap_id}*: HARD ESCALATE — stuck after {iteration} iterations. Critical issues persist:\n" +
+                              ("\n".join(f"- {str(i)[:120]}" for i in critical_issues[:5])))
+            except Exception:
+                pass
+            return
+
+        # v7.27-C: ARCHITECT-REVISIT after 4 failed CODE-REVISE iterations
+        # If the same critical_issues categories recur 3+ times, the design is wrong
+        if iteration >= 4:
+            try:
+                _v727c_recent_dir = Path(f"/var/lib/karios/iteration-tracker/{gap_id}")
+                _v727c_e2e_files = sorted(_v727c_recent_dir.rglob("e2e-results.json"),
+                                           key=lambda p: p.stat().st_mtime, reverse=True)[:4]
+                _v727c_categories = set()
+                for _v727c_f in _v727c_e2e_files:
+                    try:
+                        _v727c_d = json.loads(_v727c_f.read_text())
+                        for _v727c_c in (_v727c_d.get("critical_issues") or []):
+                            if isinstance(_v727c_c, dict) and _v727c_c.get("category"):
+                                _v727c_categories.add(_v727c_c["category"])
+                    except Exception:
+                        continue
+                # If the SAME critical category persists across 3+ recent results,
+                # the design needs rethinking (not just a code patch)
+                if len(_v727c_e2e_files) >= 3 and len(_v727c_categories) <= 2:
+                    print(f"[dispatcher] v7.27-C ARCH-REVISIT: same {len(_v727c_categories)} category(ies) across {len(_v727c_e2e_files)} iterations — sending to architect")
+                    _v727c_tid = new_trace_id(gap_id, "orchestrator", f"arch_revisit_iter{iteration}")
+                    _v727c_arch_body = (
+                        f"ARCHITECT-REVISIT — design may be wrong. Gap {gap_id} stuck at iteration {iteration}/8.\n\n"
+                        f"Backend has tried to fix the same issue categories {len(_v727c_e2e_files)} times: "
+                        f"{', '.join(sorted(_v727c_categories))}\n\n"
+                        f"Latest critical issues:\n" +
+                        "\n".join(
+                            (f"- [{i.get('severity','?')}] {i.get('category','?')}: {i.get('description', str(i)[:200])}"
+                             if isinstance(i, dict) else f"- {i}")
+                            for i in critical_issues[:10]
+                        ) +
+                        f"\n\nRequired:\n"
+                        f"  1. Read current architecture.md + critical_issues above\n"
+                        f"  2. Identify if the bug is in the DESIGN (wrong API contract, wrong storage model, etc.)\n"
+                        f"  3. Write updated architecture.md to phase-2-architecture/iteration-{iteration+1}/\n"
+                        f"  4. Send [ARCH-COMPLETE] {gap_id} iteration {iteration+1}\n"
+                        f"DO NOT write code. ONLY revise the design."
+                    )
+                    send_to_agent("architect",
+                                  f"[ARCH-REVISE] {gap_id} iteration {iteration+1}",
+                                  _v727c_arch_body,
+                                  gap_id=gap_id, trace_id=_v727c_tid, priority="high")
+                    try:
+                        notify_phase_transition(gap_id, "code-blind-tester+tester (4+ iter rev-loop)",
+                                                "architect (ARCH-REVISE)",
+                                                "ARCH-REVISIT", rating=rating,
+                                                summary=f"design revisit triggered after {iteration} failed code revisions")
+                    except Exception:
+                        pass
+                    return  # Skip backend CODE-REVISE — architect needs to act first
+            except Exception as _v727c_e:
+                print(f"[dispatcher] v7.27-C arch-revisit check failed: {_v727c_e}")
+
         can_resolve, strategy, needs_escalate = self_diagnose(
             gap_id, "3-coding", iteration, rating, combined_issues)
 
@@ -1929,10 +2240,34 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                                "iterations": iteration, "issues": critical_issues,
                                "self_diagnosis": strategy, "trace_id": tid})
             telegram_alert(f"🚨 *{gap_id}*: Coding loop EXHAUSTED ({rating}/10, {iteration} iter). {strategy}")
-            send_to_agent("sai", f"[ESCALATE] {gap_id} — Coding loop exhausted",
-                          f"Gap {gap_id}: {strategy}\n"
-                          f"Final rating: {rating}/10.\n"
-                          f"Issues:\n" + "\n".join(f"- {i}" for i in critical_issues))
+            # v7.34: use format_critical_issues_for_revise for detailed body
+            _v734_detail = format_critical_issues_for_revise(critical_issues, kind="code")
+            escalate_to_human(gap_id, "Coding loop exhausted",
+                              f"{strategy}\n\nFinal rating: {rating}/10.\n\n"
+                              f"=== CRITICAL ISSUES (detailed v7.32 format) ===\n{_v734_detail}",
+                              rating=rating, iteration=iteration)
+            # v7.34: ALSO send one last CODE-REVISE attempt with full v7.32 detail
+            # before fully freezing. Backend may finally fix it with the explicit spec.
+            try:
+                if _PROMPT_BUILDER:
+                    _v734_lc_tid = new_trace_id(gap_id, "orchestrator", f"final_revise_iter{iteration+1}")
+                    _v734_revise_body = _build_prompt(
+                        task_type="CODE-REQUEST", gap_id=gap_id, iteration=iteration+1,
+                        trace_id=_v734_lc_tid, repo="karios-migration",
+                        intent_tags=["vmware", "7_dimensions"],
+                        intent_query=f"FINAL ATTEMPT iter{iteration+1} {gap_id}",
+                        commit_title=f"fix({gap_id}): FINAL iter{iteration+1} address E2E critical issues",
+                        extra_context=(f"FINAL ATTEMPT — pipeline will escalate to human after this.\n\n"
+                                       f"PRIOR E2E RATING: {rating}/10. Self-diagnosis: {strategy}\n\n"
+                                       f"=== DETAILED ISSUE SPECS (v7.32) ===\n{_v734_detail}\n\n"
+                                       f"This is your LAST automated chance. Read each suggested_fix carefully.")
+                    )
+                    send_to_agent("backend",
+                                  f"[CODE-REVISE-FINAL] {gap_id} iteration {iteration+1}",
+                                  _v734_revise_body, gap_id=gap_id, trace_id=_v734_lc_tid, priority="high")
+                    print(f"[dispatcher] v7.34: dispatched FINAL CODE-REVISE to backend with full v7.32 detail before freeze")
+            except Exception as _v734_e:
+                print(f"[dispatcher] v7.34 final-revise failed: {_v734_e}")
             print(f"[dispatcher] Gap {gap_id} ESCALATED: {strategy}")
         else:
             next_iter = iteration + 1
@@ -1941,12 +2276,58 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                              self_diagnosis=strategy)
             update_agent_checkpoint("backend", phase="phase-3-coding", iteration=next_iter)
             update_agent_checkpoint("frontend", phase="phase-3-coding", iteration=next_iter)
+            # v7.23.2: if errors classify as infra/deployment, route to DEVOPS instead of backend
+            try:
+                _v7232_cat, _ = classify_error(combined_issues)
+                if _v7232_cat in ("infra", "deployment"):
+                    # v7.32: detailed infra issue rendering for devops
+                    _v7232_issues_short = format_critical_issues_for_revise(critical_issues, kind="code")
+                    _v7232_devops_body = (
+                        f"INFRA/DEPLOYMENT issue — devops action required. Gap {gap_id} iter {next_iter}.\n\n"
+                        f"PRIOR E2E RATING: {rating}/10 (REJECT). Self-diagnosis: {strategy}\n\n"
+                        f"INFRA ISSUES TO RESOLVE:\n{_v7232_issues_short}\n\n"
+                        f"REQUIRED FIRST 3 TOOL CALLS (no prose):\n"
+                        f"  1. bash: systemctl status karios-migration --no-pager 2>&1 | head -30\n"
+                        f"  2. bash: journalctl -u karios-migration --no-pager -n 50\n"
+                        f"  3. bash: cat /etc/systemd/system/karios-migration.service && cat /etc/karios/secrets.env 2>&1 | grep -i database\n\n"
+                        f"After identifying the env/service/config issue:\n"
+                        f"  - fix /etc/karios/secrets.env or systemd unit\n"
+                        f"  - systemctl daemon-reload && systemctl restart karios-migration\n"
+                        f"  - verify with: curl -sI http://localhost:8089/api/v1/healthz\n"
+                        f"  - confirm with: agent send orchestrator '[INFRA-FIXED] {gap_id} iteration {next_iter}'\n"
+                        f"DO NOT touch Go code. ONLY fix infra/env/service config."
+                    )
+                    print(f"[dispatcher] v7.23.2 INFRA-FIX routing for {gap_id} iter {next_iter} (category={_v7232_cat}) — devops, not backend")
+                    # v7.24-5: fresh trace per INFRA-FIX too
+                    _v724_5_infra_tid = new_trace_id(gap_id, "orchestrator", f"infra_iter{next_iter}")
+                    send_to_agent("devops",
+                                  f"[INFRA-FIX] {gap_id} iteration {next_iter}",
+                                  _v7232_devops_body,
+                                  gap_id=gap_id, trace_id=_v724_5_infra_tid, priority="high")
+                    try:
+                        notify_phase_transition(gap_id, "code-blind-tester+tester",
+                                                "devops (infra fix)",
+                                                "INFRA-FIX", rating=rating,
+                                                summary=f"infra/deployment errors detected; devops action required")
+                    except Exception:
+                        pass
+                    return  # Skip the backend CODE-REVISE dispatch below
+            except Exception as _v7232_e:
+                print(f"[dispatcher] v7.23.2 routing check failed: {_v7232_e}")
+            # v7.22-C: explicitly persist iteration to state.json (was getting reset by [COMPLETE] handler)
+            try:
+                _v722c_state_path = Path("/var/lib/karios/orchestrator/state.json")
+                _v722c_state = json.loads(_v722c_state_path.read_text())
+                _v722c_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["iteration"] = next_iter
+                _v722c_state["active_gaps"][gap_id]["phase"] = "3-coding"
+                _v722c_state["active_gaps"][gap_id]["last_rating"] = rating
+                _v722c_state_path.write_text(json.dumps(_v722c_state, indent=2))
+                print(f"[dispatcher] v7.22-C persisted iter={next_iter} to state.json for {gap_id}")
+            except Exception as _v722c_e:
+                print(f"[dispatcher] v7.22-C state persist failed: {_v722c_e}")
             # v7.15: dispatch BACKEND for code revise (not devops) — bugs need code fixes
-            _issues_str = "\n".join(
-                (f"- [{i.get('severity','?')}] {i.get('description', str(i)[:200])}"
-                 if isinstance(i, dict) else f"- {i}")
-                for i in critical_issues[:10]
-            )
+            # v7.34.1: ALWAYS use format_critical_issues_for_revise (v7.32 SWE-Bench-style)
+            _issues_str = format_critical_issues_for_revise(critical_issues, kind="code")
             if _PROMPT_BUILDER:
                 _revise_body = _build_prompt(
                     task_type="CODE-REQUEST",
@@ -1958,18 +2339,70 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                     intent_query=f"revise iter{next_iter} {gap_id}",
                     commit_title=f"fix({gap_id}): iter{next_iter} address E2E critical issues",
                     extra_context=(f"PRIOR E2E RATING: {rating}/10 (REJECT). Self-diagnosis: {strategy}\n\n"
-                                   f"CRITICAL ISSUES TO FIX (from code-blind-tester):\n{_issues_str}\n\n"
-                                   f"Iterate on EXISTING branch backend/{gap_id}-cbt — do NOT recreate. "
-                                   f"Fix each critical issue with new commits.")
+                                   f"CRITICAL ISSUES (verbatim from code-blind-tester):\n{_issues_str}\n\n"
+                                   f"=== MANDATORY BUILD-FIX-BUILD LOOP (no prose, all tool calls) ===\n\n"
+                                   f"STEP 1 — go to repo and the broken branch:\n"
+                                   f"  cd /root/karios-source-code/karios-migration\n"
+                                   f"  git fetch --all && git checkout backend/{gap_id}-cbt 2>/dev/null || git checkout -b backend/{gap_id}-cbt\n\n"
+                                   f"STEP 2 — capture EVERY build error with file:line:\n"
+                                   f"  go build ./... 2>&1 | tee /tmp/build-iter{next_iter}.log | head -40\n\n"
+                                   f"STEP 3 — fix each error using read_file + file_write. KNOWN GOVMOMI API DRIFT FIXES:\n"
+                                   f"  - `task.WaitEx(ctx)` returns ONLY error → replace with `task.WaitForResult(ctx, nil)` which returns `(*types.TaskInfo, error)`\n"
+                                   f"  - `taskInfo.Snapshot.Value` → `taskInfo.Result.(types.ManagedObjectReference).Value`\n"
+                                   f"  - `device.Backing.FileName` → `device.Backing.(*types.VirtualDiskFlatVer2BackingInfo).FileName`\n"
+                                   f"  - `provider.StorageTypeIndependent` undefined → add `StorageTypeIndependent StorageType = \"independent\"` to pkg/provider/types.go\n"
+                                   f"  - `vmObj.ExportSnapshot(ctx, ref)` returns `(*nfc.Lease, error)` not 3 values\n"
+                                   f"  - `QueryChangedDiskAreas(ctx, *Mo, *Mo, *Disk, int64)` — needs pointers + VirtualDisk + int64 offset\n"
+                                   f"  - DiskChangeInfo fields: `Length` (not ChangedAreaSize), `ChangedArea` (not ChangedAreas)\n"
+                                   f"  - syntax errors `unexpected name X expected (` usually mean missing `}}` brace before line X — count braces in surrounding function\n\n"
+                                   f"STEP 4 — verify build is GREEN:\n"
+                                   f"  go build ./... && echo BUILD_OK || echo BUILD_FAIL\n\n"
+                                   f"STEP 5 — IF BUILD_OK: commit and push:\n"
+                                   f"  git add -A internal/ pkg/ cmd/  # explicit dirs only, never agentic-workflow files\n"
+                                   f"  git commit -m 'fix(iter{next_iter}): {gap_id} — address build errors'\n"
+                                   f"  git push origin backend/{gap_id}-cbt\n"
+                                   f"  agent send orchestrator '[CODING-COMPLETE] {gap_id} commit_sha=<40-hex>'\n\n"
+                                   f"STEP 6 — IF BUILD_FAIL after 3 fix attempts: write iteration-tracker note + emit [CODING-ERROR]\n\n"
+                                   f"HARD RULES:\n"
+                                   f"- DO NOT WRITE PROSE. Every action MUST be a tool call.\n"
+                                   f"- DO NOT skip the go build step. The error list above MUST be ground truth.\n"
+                                   f"- DO NOT add new features. ONLY fix listed errors.\n"
+                                   f"- iteration {next_iter}/8. Coding category escalates after 2 fails — be precise.")
                 )
             else:
                 _revise_body = (f"E2E iter {iteration} rated {rating}/10. Critical issues:\n{_issues_str}\n\n"
                                 f"Fix and re-emit [CODING-COMPLETE] with new commit_sha.")
+            # v7.24-5: fresh trace_id per CODE-REVISE iteration (was reusing old trace from initial dispatch)
+            _v724_5_revise_tid = new_trace_id(gap_id, "orchestrator", f"revise_iter{next_iter}")
             send_to_agent("backend",
                           f"[CODE-REVISE] {gap_id} iteration {next_iter}",
                           _revise_body,
-                          gap_id=gap_id, trace_id=tid, priority="high")
+                          gap_id=gap_id, trace_id=_v724_5_revise_tid, priority="high")
             print(f"[dispatcher] Gap {gap_id} CODE-REVISE -> backend (iter {next_iter}/8): {strategy}")
+            # v7.33.1: also re-dispatch FRESH [E2E-REVIEW] + [TEST-RUN] using v7.31 detailed
+            # template + v7.32 schema so testers re-evaluate against current state with the
+            # upgraded prompt format. Without this, cbt/tester reuse stale OLD prompts forever.
+            try:
+                if _PROMPT_BUILDER:
+                    _v733_1_e2e_tid = new_trace_id(gap_id, "orchestrator", f"reretest_iter{next_iter}")
+                    _v733_1_e2e_body = _build_prompt(task_type="E2E-REVIEW", gap_id=gap_id,
+                                                       iteration=next_iter, trace_id=_v733_1_e2e_tid,
+                                                       repo="karios-migration",
+                                                       intent_tags=["7_dimensions", "vmware", "adversarial"],
+                                                       intent_query=f"e2e re-test post code-revise {gap_id}")
+                    _v733_1_test_body = _build_prompt(task_type="TEST-RUN", gap_id=gap_id,
+                                                        iteration=next_iter, trace_id=_v733_1_e2e_tid,
+                                                        repo="karios-migration",
+                                                        intent_query=f"functional re-test {gap_id}")
+                    send_to_agent("code-blind-tester",
+                                  f"[E2E-REVIEW] {gap_id} iteration {next_iter}",
+                                  _v733_1_e2e_body, gap_id=gap_id, trace_id=_v733_1_e2e_tid)
+                    send_to_agent("tester",
+                                  f"[TEST-RUN] {gap_id} iteration {next_iter}",
+                                  _v733_1_test_body, gap_id=gap_id, trace_id=_v733_1_e2e_tid)
+                    print(f"[dispatcher] v7.33.1: dispatched fresh [E2E-REVIEW]+[TEST-RUN] iter {next_iter} for {gap_id} (v7.31 template)")
+            except Exception as _v733_1_e:
+                print(f"[dispatcher] v7.33.1 re-dispatch failed: {_v733_1_e}")
             try:
                 notify_phase_transition(gap_id, "code-blind-tester", f"backend (revise iter {next_iter})",
                                         "E2E-REVISE", rating=rating,
@@ -2337,6 +2770,10 @@ def progress_probe_check():
                 _save_probe_state(_PROGRESS_PROBE_STATE)
                 # Determine which agent owns this phase
                 phase_to_agent = {
+                    "phase-1-research": "architect",
+                    "1-research": "architect",
+                    "phase-0-requirement": "architect",
+                    "0-requirement": "architect",
                     "phase-2-arch-loop": "architect",
                     "phase-2-architecture": "architect",
                     "2-arch-loop": "architect",
@@ -2423,6 +2860,22 @@ def parse_message(msg_id: str, data: dict):
         return
 
     print(f"[dispatcher] ← {sender}: {subject} (trace={trace_id})")
+
+    # v7.41: top-level terminal-state guard. Drop ANY message addressed to a gap that is in
+    # active_gaps with state in (completed/closed/cancelled/escalated). Stops ghost cycles
+    # from in-flight Hermes sessions whose gaps were closed mid-flight (e.g., pre-cleanup
+    # backend that completes after queues drained → [E2E-RESULTS] / [CODE-REVISE] cascade).
+    # Allow [REQUIREMENT] and [HUMAN-MESSAGE] through (they have no gap_id yet or are admin).
+    if gap_id and not subject.startswith("[REQUIREMENT]") and not subject.startswith("[HUMAN-MESSAGE]"):
+        try:
+            _v741_st = load_state() or {}
+            _v741_ge = _v741_st.get("active_gaps", {}).get(gap_id, {})
+            _v741_state = _v741_ge.get("state")
+            if _v741_state in ("completed", "closed", "cancelled", "escalated"):
+                print(f"[dispatcher] v7.41 DROP {subject[:40]} for {gap_id}: state={_v741_state} (terminal — ghost message ignored)")
+                return
+        except Exception as _v741_e:
+            print(f"[dispatcher] v7.41 state check failed (proceeding): {_v741_e}")
 
     # v7.6 Item A: Pydantic schema validation (log-only first pass)
     if _SCHEMA_VALIDATION and subject and body:
@@ -2670,7 +3123,41 @@ def parse_message(msg_id: str, data: dict):
                                       review.get("recommendation", "REQUEST_CHANGES"),
                                       trace_id=review.get("trace_id") or trace_id)
             except json.JSONDecodeError:
-                print(f"[dispatcher] ERROR: Could not parse arch review JSON: {body[:200]}")
+                # v7.38: disk fallback for arch reviews (parallel to v7.20 for E2E)
+                print(f"[dispatcher] WARN: arch review body unparseable, trying disk fallback for {gid}")
+                try:
+                    from pathlib import Path as _v738_P
+                    _v738_root = _v738_P(f"/var/lib/karios/iteration-tracker/{gid}")
+                    _v738_files = list(_v738_root.rglob("review.json"))
+                    if _v738_files:
+                        _v738_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        _v738_latest = _v738_files[0]
+                        _v738_text = _v738_latest.read_text()
+                        # Strip markdown fence
+                        _m_fb = re.search(r"```(?:json)?\s*\n(.+?)\n```", _v738_text, re.DOTALL)
+                        if _m_fb:
+                            _v738_text = _m_fb.group(1)
+                        if not _v738_text.strip().startswith("{"):
+                            _m_fb2 = re.search(r"\{.*\}", _v738_text, re.DOTALL)
+                            if _m_fb2:
+                                _v738_text = _m_fb2.group(0)
+                        review = json.loads(_v738_text)
+                        print(f"[dispatcher] v7.38 disk fallback: loaded {_v738_latest} for {gid}")
+                        handle_arch_review(gid, iteration, review.get("rating", 0),
+                                           review.get("critical_issues", []),
+                                           review.get("summary", ""),
+                                           review.get("dimensions", {}),
+                                           review.get("adversarial_test_cases", {}),
+                                           review.get("recommendation", "REQUEST_CHANGES"),
+                                           trace_id=review.get("trace_id") or trace_id)
+                    else:
+                        print(f"[dispatcher] v7.38 disk fallback: no review.json under {_v738_root}")
+                        try:
+                            telegram_alert(f"⚠️ *{gid}*: ARCH-REVIEWED unparseable + no disk fallback")
+                        except Exception:
+                            pass
+                except Exception as _v738_e:
+                    print(f"[dispatcher] v7.38 disk fallback failed: {_v738_e}")
             except Exception as _ar_e:
                 print(f"[dispatcher] WARN: handle_arch_review exception {type(_ar_e).__name__}: {_ar_e}; dropping")
         return
@@ -2692,6 +3179,17 @@ def parse_message(msg_id: str, data: dict):
         coding_complete = coding_complete_match.group(1) == "True" if coding_complete_match else False
 
         if gap_id:
+            # v7.39: drop [COMPLETE] for terminal-state gaps. Prevents in-flight Hermes work
+            # from cleaned-up gaps (e.g., ARCH-IT-001 ghosts from earlier session) from
+            # cycling [E2E-REVIEW] / [TEST-RUN] dispatches that re-spawn dead work.
+            try:
+                _v739_st = load_state() or {}
+                _v739_ge = _v739_st.get("active_gaps", {}).get(gap_id, {})
+                if _v739_ge.get("state") in ("completed", "closed", "cancelled", "escalated"):
+                    print(f"[dispatcher] v7.39 DROP [COMPLETE] for {gap_id}: state={_v739_ge.get('state')} (terminal — ignoring ghost work)")
+                    return
+            except Exception as _v739_e:
+                print(f"[dispatcher] v7.39 state check failed (proceeding): {_v739_e}")
             gap_data = load_gap(gap_id)
             current_phase = gap_data.get("phase", "unknown") if gap_data else "unknown"
             status = "COMPLETE" if coding_complete else "ERROR"
@@ -2711,19 +3209,85 @@ def parse_message(msg_id: str, data: dict):
             if n_phase in ("1-research", "1-research-pre") and n_current == "1-research":
                 advance_to_arch_loop(gap_id, iteration, body, trace_id=trace_id)
             elif n_phase in ("2-arch-loop", "2-architecture") and n_current in ("2-arch-loop", "2-architecture"):
-                transition_phase(gap_id, "3-coding", iteration=iteration, trace_id=trace_id)
+                # v7.40: do NOT auto-transition to 3-coding here. The [ARCH-REVIEWED] handler
+                # owns the rating-aware decision (advance vs revise vs escalate). This [COMPLETE]
+                # is just architect-blind-tester acknowledging it finished — phase stays under
+                # the ARCH-REVIEWED handler control. Otherwise we race the self-correction path
+                # and clobber a pending [ARCH-ITERATE] iter dispatch.
+                if sender in ("architect-blind-tester", "architect_blind_tester", "blind-tester"):
+                    print(f"[dispatcher] v7.40 [COMPLETE] from blind-tester for {gap_id} 2-arch-loop — acknowledged, no phase change (ARCH-REVIEWED owns routing)")
+                else:
+                    transition_phase(gap_id, "3-coding", iteration=iteration, trace_id=trace_id)
             elif n_phase == "3-coding" and n_current in ("3-coding", "2-arch-loop", "2-architecture"):
-                # Coding complete → trigger API-SYNC gate (also accept arriving from 2-* if state lagged)
-                gap_data = load_gap(gap_id) or {}
-                gap_data["iteration_status"] = "awaiting_sync"
-                gap_data["phase"] = "phase-3-coding"
-                save_gap(gap_id, gap_data)
-                send_to_agent("backend",
-                            f"[API-SYNC] {gap_id} — ready for API contract verification",
-                            f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
-                            "Verify the API contract against the implementation. "
-                            "Report back with [CODING-COMPLETE] or [CODING-ERROR].",
-                            gap_id=gap_id, trace_id=trace_id)
+                # v7.21-C: if recent e2e-results.json exists with rating < 8, route to CODE-REVISE
+                # instead of pointless [API-SYNC] (backend keeps prose-emitting [COMPLETE] without
+                # actually fixing the build; firing [API-SYNC] just re-loops).
+                _v721_skip_apisync = False
+                try:
+                    import time as _v721_t
+                    _v721_results = list((IT_DIR / gap_id).rglob("e2e-results.json"))
+                    if _v721_results:
+                        _v721_results.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        _v721_latest = _v721_results[0]
+                        if (_v721_t.time() - _v721_latest.stat().st_mtime) < 900:  # <15 min old
+                            _v721_data = json.loads(_v721_latest.read_text())
+                            _v721_rating = _v721_data.get("rating", 10)
+                            if _v721_rating < 8:
+                                _v721_crit = _v721_data.get("critical_issues", [])
+                                if not isinstance(_v721_crit, list):
+                                    _v721_crit = []
+                                print(f"[dispatcher] v7.21-C [COMPLETE] phase=3-coding for {gap_id} "
+                                      f"BUT recent e2e (rating={_v721_rating}/10) failing — "
+                                      f"routing to handle_e2e_results instead of [API-SYNC]")
+                                handle_e2e_results(gap_id, iteration, _v721_rating,
+                                                    _v721_crit,
+                                                    _v721_data.get("test_results", {}),
+                                                    _v721_data.get("dimensions", {}),
+                                                    _v721_data.get("adversarial_tests", {}),
+                                                    _v721_data.get("recommendation", "REQUEST_CHANGES"),
+                                                    trace_id=trace_id)
+                                # v7.33: re-dispatch fresh [E2E-REVIEW] + [TEST-RUN] using v7.31 detailed
+                                # prompt template so testers produce v7.32-schema results next iteration.
+                                # Without this, cbt keeps re-using its OLD generic prompt from a stale
+                                # message and never picks up the upgraded template.
+                                try:
+                                    _v733_iter = iteration + 1
+                                    _v733_tid = new_trace_id(gap_id, "orchestrator", f"reretest_iter{_v733_iter}")
+                                    if _PROMPT_BUILDER:
+                                        _v733_e2e = _build_prompt(task_type="E2E-REVIEW", gap_id=gap_id,
+                                                                    iteration=_v733_iter, trace_id=_v733_tid,
+                                                                    repo="karios-migration",
+                                                                    intent_tags=["7_dimensions", "vmware", "adversarial"],
+                                                                    intent_query=f"e2e re-test post code-revise {gap_id}")
+                                        _v733_test = _build_prompt(task_type="TEST-RUN", gap_id=gap_id,
+                                                                     iteration=_v733_iter, trace_id=_v733_tid,
+                                                                     repo="karios-migration",
+                                                                     intent_query=f"functional re-test {gap_id}")
+                                        send_to_agent("code-blind-tester",
+                                                      f"[E2E-REVIEW] {gap_id} iteration {_v733_iter}",
+                                                      _v733_e2e, gap_id=gap_id, trace_id=_v733_tid)
+                                        send_to_agent("tester",
+                                                      f"[TEST-RUN] {gap_id} iteration {_v733_iter}",
+                                                      _v733_test, gap_id=gap_id, trace_id=_v733_tid)
+                                        print(f"[dispatcher] v7.33: dispatched fresh [E2E-REVIEW]+[TEST-RUN] iter {_v733_iter} for {gap_id} (v7.31 template, v7.32 schema)")
+                                except Exception as _v733_e:
+                                    print(f"[dispatcher] v7.33 re-dispatch failed: {_v733_e}")
+                                _v721_skip_apisync = True
+                except Exception as _v721_e:
+                    print(f"[dispatcher] v7.21-C check failed (falling through to API-SYNC): {_v721_e}")
+
+                if not _v721_skip_apisync:
+                    # Coding complete → trigger API-SYNC gate (also accept arriving from 2-* if state lagged)
+                    gap_data = load_gap(gap_id) or {}
+                    gap_data["iteration_status"] = "awaiting_sync"
+                    gap_data["phase"] = "phase-3-coding"
+                    save_gap(gap_id, gap_data)
+                    send_to_agent("backend",
+                                f"[API-SYNC] {gap_id} — ready for API contract verification",
+                                f"gap_id={gap_id}\niteration={iteration}\ntrace_id={trace_id}\n\n"
+                                "Verify the API contract against the implementation. "
+                                "Report back with [CODING-COMPLETE] or [CODING-ERROR].",
+                                gap_id=gap_id, trace_id=trace_id)
             elif n_phase in ("3-coding-sync", "3-coding-testing") or n_phase.startswith("3-coding"):
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
                 # v7.12: E2E build_prompt — 7 dimensions + VMware intent
@@ -2789,7 +3353,42 @@ def parse_message(msg_id: str, data: dict):
                 except Exception as _e:
                     print(f"[dispatcher] notify error: {_e}")
             else:
-                print(f"[dispatcher] COMPLETE handler: no transition for {gap_id} {phase} (current={current_phase}; normalized {n_phase}/{n_current})")
+                # v7.18: Subject normalizer — if a tester emits [COMPLETE] without proper subject,
+                # rewrite as [E2E-RESULTS] / [TEST-RESULTS] using on-disk JSON or honest REJECT
+                _normalized = None
+                if _v718_normalize is not None:
+                    try:
+                        _normalized = _v718_normalize(
+                            sender=sender,
+                            gap_id=gap_id,
+                            active_phase=current_phase or n_current or "",
+                            iteration=iteration if iteration else 1,
+                            trace_id=trace_id or "",
+                        )
+                    except Exception as _ne:
+                        print(f"[dispatcher] v7.18 normalizer failed: {_ne}")
+                if _normalized:
+                    print(f"[dispatcher] v7.18 [COMPLETE] from {sender} → rewriting as {_normalized['subject']} ({_normalized['source']})")
+                    try:
+                        # Inject the rewritten message back into orchestrator inbox
+                        from pathlib import Path as _P
+                        import json as _j, time as _t, uuid as _u
+                        _inj = _P("/var/lib/karios/agent-msg/inbox/orchestrator")
+                        _inj.mkdir(parents=True, exist_ok=True)
+                        (_inj / f"v718-norm-{gap_id}-{int(_t.time())}-{_u.uuid4().hex[:6]}.json").write_text(_j.dumps({
+                            "from": sender,
+                            "to": "orchestrator",
+                            "id": f"v718-norm-{_u.uuid4().hex[:8]}",
+                            "subject": _normalized["subject"],
+                            "body": _normalized["body"],
+                            "gap_id": gap_id,
+                            "trace_id": trace_id or "",
+                            "priority": "high",
+                        }))
+                    except Exception as _ie:
+                        print(f"[dispatcher] v7.18 normalizer inject failed: {_ie}")
+                else:
+                    print(f"[dispatcher] COMPLETE handler: no transition for {gap_id} {phase} (current={current_phase}; normalized {n_phase}/{n_current})")
         else:
             print(f"[dispatcher] ← [COMPLETE] but no gap_id in body: {body[:100]}")
         return
@@ -2953,16 +3552,124 @@ def parse_message(msg_id: str, data: dict):
         submit_code_for_test(gid, iteration)
         return
 
+
+    # v7.24-7: [INFRA-FIXED] handler — devops repaired infra, re-test directly
+    if subject.startswith("[INFRA-FIXED]"):
+        try:
+            _v724_7_tokens = subject.split("]")[1].strip().split() if "]" in subject else []
+            _v724_7_gid = _v724_7_tokens[0] if _v724_7_tokens else None
+            if not _v724_7_gid:
+                # fallback to active gap
+                try:
+                    _v724_7_state = json.loads(Path("/var/lib/karios/orchestrator/state.json").read_text())
+                    _v724_7_active = [k for k, v in _v724_7_state.get("active_gaps", {}).items()
+                                      if v.get("state") not in ("completed", "closed")]
+                    if len(_v724_7_active) == 1:
+                        _v724_7_gid = _v724_7_active[0]
+                except Exception:
+                    pass
+            if _v724_7_gid:
+                _v724_7_iter_t = _v724_7_tokens[_v724_7_tokens.index("iteration")+1] if "iteration" in _v724_7_tokens else None
+                _v724_7_iter = int(_v724_7_iter_t.rstrip(":")) if _v724_7_iter_t else 1
+                # Recover iter from state.json
+                try:
+                    _v724_7_state2 = json.loads(Path("/var/lib/karios/orchestrator/state.json").read_text())
+                    _v724_7_state_iter = _v724_7_state2.get("active_gaps", {}).get(_v724_7_gid, {}).get("iteration")
+                    if isinstance(_v724_7_state_iter, int) and _v724_7_state_iter > _v724_7_iter:
+                        _v724_7_iter = _v724_7_state_iter
+                except Exception:
+                    pass
+                _v724_7_tid = new_trace_id(_v724_7_gid, "orchestrator", f"reretest_iter{_v724_7_iter}")
+                print(f"[dispatcher] v7.24-7 [INFRA-FIXED] {_v724_7_gid} — re-dispatching E2E-REVIEW + TEST-RUN to testers")
+                # Use existing prompt builder if available
+                if _PROMPT_BUILDER:
+                    _v724_7_e2e_body = _build_prompt(task_type="E2E-REVIEW", gap_id=_v724_7_gid,
+                                                      iteration=_v724_7_iter, trace_id=_v724_7_tid,
+                                                      repo="karios-migration",
+                                                      intent_tags=["7_dimensions", "vmware", "adversarial"],
+                                                      intent_query=f"e2e re-test after infra fix {_v724_7_gid}")
+                    _v724_7_test_body = _build_prompt(task_type="TEST-RUN", gap_id=_v724_7_gid,
+                                                       iteration=_v724_7_iter, trace_id=_v724_7_tid,
+                                                       repo="karios-migration",
+                                                       intent_query=f"functional re-test {_v724_7_gid}")
+                else:
+                    _v724_7_e2e_body = f"Re-test {_v724_7_gid} iter {_v724_7_iter} after infra fix. Run full E2E."
+                    _v724_7_test_body = f"Re-test {_v724_7_gid} iter {_v724_7_iter} after infra fix. Run tests."
+                send_to_agent("code-blind-tester",
+                              f"[E2E-REVIEW] {_v724_7_gid} iteration {_v724_7_iter}",
+                              _v724_7_e2e_body, gap_id=_v724_7_gid, trace_id=_v724_7_tid)
+                send_to_agent("tester",
+                              f"[TEST-RUN] {_v724_7_gid} iteration {_v724_7_iter}",
+                              _v724_7_test_body, gap_id=_v724_7_gid, trace_id=_v724_7_tid)
+                try:
+                    notify_phase_transition(_v724_7_gid, "devops (infra fix)",
+                                            "code-blind-tester+tester (re-test)",
+                                            "INFRA-FIXED", rating=None,
+                                            summary="infra repaired; re-running E2E + tests")
+                except Exception:
+                    pass
+        except Exception as _v724_7_e:
+            print(f"[dispatcher] v7.24-7 INFRA-FIXED handler failed: {_v724_7_e}")
+        return
+
     # ── E2E results (v4.0: includes dimensions, adversarial_tests, recommendation) ──
     if subject.startswith("[E2E-RESULTS]") or subject.startswith("[BLIND-E2E-RESULTS]") or subject.startswith("[E2E-COMPLETE]") or subject.startswith("[TEST-RESULTS]") or subject.startswith("[BLIND-E2E-RESULTS]") or subject.startswith("[E2E-COMPLETE]") or (subject.startswith("[TASK-COMPLETE]") and "E2E" in subject):  # v7.3 alias
         remaining = subject.split("]")[1].strip() if "]" in subject else subject
         tokens = remaining.split()
         if not tokens:
-            print(f"[dispatcher] ERROR: [E2E-RESULTS] message has no gap_id in subject: {subject!r}")
-            return
-        gid = tokens[0]
-        _iter_token = tokens[tokens.index("iteration") + 1] if "iteration" in tokens else None
-        iteration = int(_iter_token.rstrip(':')) if _iter_token else 1
+            # v7.21.1: try trace_id pattern then active-gap fallback
+            _v721_1_gid = None
+            try:
+                _v721_1_pat = re.search(r"(ARCH[\-_]IT[\-_]\w+|REQ[\-_]\w+|GAP[\-_]\w+)", trace_id or "")
+                if _v721_1_pat:
+                    _v721_1_gid = _v721_1_pat.group(1).replace("_", "-")
+            except Exception:
+                pass
+            if not _v721_1_gid:
+                try:
+                    _v721_1_state = json.loads(Path("/var/lib/karios/orchestrator/state.json").read_text())
+                    _v721_1_active = [k for k, v in _v721_1_state.get("active_gaps", {}).items()
+                                      if v.get("state") not in ("completed", "closed", "cancelled", "escalated")
+                                      and v.get("phase") in ("3-coding", "phase-3-coding",
+                                                              "4-testing", "phase-4-testing",
+                                                              "3-coding-sync", "3-coding-testing")]
+                    if len(_v721_1_active) == 1:
+                        _v721_1_gid = _v721_1_active[0]
+                except Exception:
+                    pass
+            if _v721_1_gid:
+                print(f"[dispatcher] v7.21.1 [E2E-RESULTS] no gap in subject — recovered gap_id={_v721_1_gid} (from trace_id or active-gap fallback)")
+                gid = _v721_1_gid
+                tokens = [gid]
+                # v7.22-A: also recover iteration from state.json instead of defaulting to 1
+                try:
+                    _v722_state = json.loads(Path("/var/lib/karios/orchestrator/state.json").read_text())
+                    _v722_gap = _v722_state.get("active_gaps", {}).get(_v721_1_gid, {})
+                    _v722_iter = _v722_gap.get("iteration")
+                    if _v722_iter and isinstance(_v722_iter, int) and _v722_iter > 0:
+                        # Inject iter token into tokens so existing parser picks it up
+                        tokens = [gid, "iteration", str(_v722_iter)]
+                        print(f"[dispatcher] v7.22-A recovered iteration={_v722_iter} from state.json for {_v721_1_gid}")
+                except Exception as _v722_e:
+                    print(f"[dispatcher] v7.22-A iter recovery failed: {_v722_e}")
+            else:
+                print(f"[dispatcher] ERROR: [E2E-RESULTS] message has no gap_id in subject: {subject!r} and trace/state fallback failed")
+                return
+        else:
+            gid = tokens[0]
+        # v7.28-4: safe IndexError + try/except on int()
+        _iter_token = None
+        try:
+            if "iteration" in tokens:
+                _v728_4_idx = tokens.index("iteration") + 1
+                if _v728_4_idx < len(tokens):
+                    _iter_token = tokens[_v728_4_idx]
+        except Exception:
+            _iter_token = None
+        try:
+            iteration = int(_iter_token.rstrip(':')) if _iter_token else 1
+        except (ValueError, AttributeError):
+            iteration = 1
         try:
             # v7.5.3: extract JSON from prose+fence body (same fix as handle_arch_review)
             _b = body.strip()
@@ -2972,9 +3679,36 @@ def parse_message(msg_id: str, data: dict):
             if _m:
                 _b = _m.group(1)
             if not _b.strip().startswith('{'):
-                _m2 = re.search(r'\{.*\}', _b, re.DOTALL)
-                if _m2:
-                    _b = _m2.group(0)
+                # v7.28-3: balanced-brace parser instead of greedy `{.*}`
+                # (greedy version captured wrong object when body had multiple {...} blocks)
+                _v728_3_first = _b.find("{")
+                if _v728_3_first >= 0:
+                    _v728_3_depth = 0
+                    _v728_3_end = -1
+                    _v728_3_in_str = False
+                    _v728_3_escape = False
+                    for _v728_3_i in range(_v728_3_first, len(_b)):
+                        _v728_3_c = _b[_v728_3_i]
+                        if _v728_3_escape:
+                            _v728_3_escape = False
+                            continue
+                        if _v728_3_c == "\\":
+                            _v728_3_escape = True
+                            continue
+                        if _v728_3_c == '"':
+                            _v728_3_in_str = not _v728_3_in_str
+                            continue
+                        if _v728_3_in_str:
+                            continue
+                        if _v728_3_c == "{":
+                            _v728_3_depth += 1
+                        elif _v728_3_c == "}":
+                            _v728_3_depth -= 1
+                            if _v728_3_depth == 0:
+                                _v728_3_end = _v728_3_i + 1
+                                break
+                    if _v728_3_end > 0:
+                        _b = _b[_v728_3_first:_v728_3_end]
             results = json.loads(_b)
             _r = results.get("rating", 0)
             _rec = results.get("recommendation", "?")
@@ -2985,7 +3719,7 @@ def parse_message(msg_id: str, data: dict):
             _crit_issues = results.get("critical_issues", [])
             if not isinstance(_crit_issues, list):
                 _crit_issues = []
-            handle_e2e_results(gid, iteration, results["rating"],
+            handle_e2e_results(gid, iteration, results.get("rating", results.get("score", 0)),  # v7.16.1: tolerate missing rating
                               _crit_issues,
                               results.get("test_results", {}),
                               results.get("dimensions", {}),
@@ -2993,7 +3727,56 @@ def parse_message(msg_id: str, data: dict):
                               results.get("recommendation", "REQUEST_CHANGES"),
                               trace_id=results.get("trace_id") or trace_id)
         except json.JSONDecodeError:
+            # v7.20: disk fallback — agent may have emitted bare subject without piping JSON
+            print(f"[dispatcher] WARN: E2E-RESULTS body unparseable, trying disk fallback for {gid}")
+            try:
+                from pathlib import Path as _v720_P
+                _v720_root = _v720_P(f"/var/lib/karios/iteration-tracker/{gid}")
+                _v720_files = list(_v720_root.rglob("e2e-results.json"))
+                if _v720_files:
+                    _v720_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    _v720_latest = _v720_files[0]
+                    _v720_text = _v720_latest.read_text()
+                    # Strip markdown fence if present
+                    _m_fb = re.search(r'```(?:json)?\s*\n(.+?)\n```', _v720_text, re.DOTALL)
+                    if _m_fb:
+                        _v720_text = _m_fb.group(1)
+                    if not _v720_text.strip().startswith("{"):
+                        _m_fb2 = re.search(r'\{.*\}', _v720_text, re.DOTALL)
+                        if _m_fb2:
+                            _v720_text = _m_fb2.group(0)
+                    results = json.loads(_v720_text)
+                    print(f"[dispatcher] v7.20 disk fallback: loaded {_v720_latest} for {gid}")
+                    _r = results.get("rating", 0)
+                    _rec = results.get("recommendation", "?")
+                    _next = "devops (Phase 5 deploy)" if _r >= 8 else f"backend+frontend (revise iter {iteration+1})"
+                    try:
+                        notify_phase_transition(gid, "code-blind-tester+tester", _next,
+                                                "E2E-RESULTS", rating=_r,
+                                                summary=f"[disk-fallback] recommendation={_rec}; {results.get('summary', '')[:120]}")
+                    except Exception:
+                        pass
+                    _crit_issues = results.get("critical_issues", [])
+                    if not isinstance(_crit_issues, list):
+                        _crit_issues = []
+                    handle_e2e_results(gid, iteration, results.get("rating", results.get("score", 0)),
+                                       _crit_issues,
+                                       results.get("test_results", {}),
+                                       results.get("dimensions", {}),
+                                       results.get("adversarial_tests", {}),
+                                       results.get("recommendation", "REQUEST_CHANGES"),
+                                       trace_id=results.get("trace_id") or trace_id)
+                    return
+                else:
+                    print(f"[dispatcher] v7.20 disk fallback: no e2e-results.json under {_v720_root}")
+            except Exception as _v720_e:
+                print(f"[dispatcher] v7.20 disk fallback failed: {_v720_e}")
             print(f"[dispatcher] ERROR: Could not parse E2E results JSON: {body[:200]}")
+            # v7.28-5: escalate to Telegram instead of silent drop
+            try:
+                telegram_alert(f"⚠️ *{gid}*: E2E-RESULTS unparseable AND no disk fallback — message dropped. body[:120]={body[:120]!r}")
+            except Exception:
+                pass
         return
 
     # ── Production deployed ────────────────────────────────────────────────
@@ -3170,6 +3953,17 @@ def recover_from_checkpoints(active_gaps: dict):
                           f"trace_id: {trace_id}",
                           gap_id=gap_id, trace_id=trace_id, priority="high")
         elif phase.startswith("3-"):
+            # v7.24-3: skip RECOVER if the gap had recent dispatch activity (avoids stale replay loops)
+            try:
+                import time as _v724_3_t
+                _v724_3_marker = Path(f"/var/lib/karios/agent-memory/{gap_id}_last_dispatch.ts")
+                if _v724_3_marker.exists():
+                    _v724_3_age = _v724_3_t.time() - _v724_3_marker.stat().st_mtime
+                    if _v724_3_age < 600:  # <10 min
+                        print(f"[dispatcher] v7.24-3 SKIP RECOVER {gap_id}: last dispatch {_v724_3_age:.0f}s ago (within 10min)")
+                        continue
+            except Exception:
+                pass
             send_to_agent("backend", f"[RECOVER] {gap_id} — resume coding",
                           f"Gap {gap_id} was in coding iteration {iteration} when dispatcher restarted.\n"
                           f"trace_id: {trace_id}",
@@ -3178,6 +3972,19 @@ def recover_from_checkpoints(active_gaps: dict):
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 def main():
+    # v7.18: Auto-prune stale stream entries (>6h old) before consumer-group init
+    if _v718_prune_streams is not None:
+        try:
+            import redis as _v718_redis
+            _v718_r = _v718_redis.Redis(
+                host=os.environ.get("REDIS_HOST", "192.168.118.202"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                username=os.environ.get("REDIS_USER", "karios_admin"),
+                password=os.environ.get("REDIS_PASSWORD", ""),
+            )
+            _v718_prune_streams(_v718_r, max_age_hours=6.0)
+        except Exception as _e:
+            print(f"[dispatcher] v7.18 stream-prune call failed: {_e}")
     print("[dispatcher] Dual-Loop Event Dispatcher v3.0 starting...", flush=True)
     print("[dispatcher] Improvements: Streams, Trace IDs, Dynamic Routing, Streaming, Agent Memory", flush=True)
 

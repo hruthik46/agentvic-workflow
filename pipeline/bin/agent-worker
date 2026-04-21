@@ -44,6 +44,39 @@ from hitl_interrupt import HITLInterruptHandler
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AGENT = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("HERMES_AGENT", "unknown")
+
+# v7.18: Zombie-Hermes reaper (kills orphaned Hermes processes from prior dispatcher restarts)
+sys.path.insert(0, "/var/lib/karios/orchestrator/patches")
+try:
+    from zombie_reaper import reap_zombie_hermes_for_profile as _v718_reap
+except Exception as _e:
+    _v718_reap = None
+    print(f"[agent-worker] v7.18 zombie-reaper unavailable: {_e}")
+
+# v7.19: LLM-side Langfuse trace capture
+try:
+    sys.path.insert(0, "/root/agentic-workflow/pipeline/integrations/3-langfuse")
+    # Load LANGFUSE_* from /etc/karios/secrets.env if not already in env
+    import os as _v719_os
+    _sec = "/etc/karios/secrets.env"
+    if not _v719_os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        try:
+            for _line in open(_sec).read().splitlines():
+                if _line.startswith("LANGFUSE_") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    _v719_os.environ[_k.strip()] = _v.strip()
+        except Exception:
+            pass
+    from kairos_langfuse_wrapper import init_langfuse as _v719_lf_init, trace_hermes_call as _v719_lf_hermes
+    _V719_LF_OK = _v719_lf_init()
+except Exception as _v719_e:
+    _V719_LF_OK = False
+    print(f"[agent-worker] v7.19 langfuse unavailable: {_v719_e}")
+    from contextlib import contextmanager as _v719_cm
+    @_v719_cm
+    def _v719_lf_hermes(*a, **kw):
+        yield None
+
 REDIS_HOST = os.environ.get("REDIS_HOST", "192.168.118.202")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 HERMES_CMD = os.environ.get("HERMES_CMD", "/root/.local/bin/hermes")
@@ -608,7 +641,9 @@ Start with a tool call. NO PROSE FIRST."""
 def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                   tool_use_events: list, tool_use_detected: threading.Event,
                   kill_event: threading.Event,
-                  hermes_pid_holder: list = None) -> None:
+                  hermes_pid_holder: list = None,
+                  session_start_t: float = 0.0,
+                  no_output_kill_seconds: int = 300) -> None:
     """
     Background thread that reads PTY master fd, counts tokens, detects tool_use.
     Calls os.killpg(SIGTERM) if >4000 tokens with 0 tool_use events.
@@ -625,17 +660,60 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                 break
             decoded = chunk.decode('utf-8', errors='replace')
             output_chunks.append(decoded)
+            # v7.28-2: Strip <think>...</think> from chunk before counting (MiniMax thinking is normal)
+            _v728_2_for_count = re.sub(r"<think>.*?</think>", "", decoded, flags=re.DOTALL) if "<think>" in decoded else decoded
             # Rough token estimate: words × 1.3
-            token_count[0] += len(decoded.split()) * 1.3
+            token_count[0] += len(_v728_2_for_count.split()) * 1.3
+            # v7.27-B: track chars since last tool call (separate counter)
+            try:
+                token_count[1] += len(decoded)
+            except (IndexError, TypeError):
+                token_count.append(len(decoded))
+            # If >10K chars accumulated since last tool call AND we've had at least 1 tool call,
+            # the agent is producing too much prose between actions → kill
+            if (token_count[1] > 30000 and tool_use_detected.is_set()
+                    and tool_use_events[0] > 0 and not kill_event.is_set()):
+                _v727b_hpid = hermes_pid_holder[0] if hermes_pid_holder else None
+                if _v727b_hpid:
+                    try:
+                        os.killpg(os.getpgid(_v727b_hpid), signal.SIGTERM)
+                        print(f"[{AGENT}] WATCHDOG-FREQ: SIGTERM Hermes pid={_v727b_hpid} — {token_count[1]:.0f} chars since last tool call (after {tool_use_events[0]} tool calls)")
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                kill_event.set()
+                break
 
-            # Detect tool_use event in output
-            if '"tool_use"' in decoded or 'tool_use' in decoded:
-                tool_use_events[0] += 1
-                tool_use_detected.set()
+            # v7.28-1: Detect tool_use via Hermes PTY-rendered format + raw model formats
+            # Hermes PTY actually shows: "run_agent: tool <name> completed (Xs, N chars)"
+            # NOT the raw MiniMax tags (those are consumed by Hermes parser).
+            # This is the ACTUAL signal that survives PTY rendering.
+            _v727a_tool_markers = (
+                "run_agent: tool ",       # Hermes rendered (PRIMARY)
+                "tool ",                  # broader Hermes match (e.g. "tool terminal completed")
+                "<minimax:tool_call>",    # raw MiniMax XML
+                "<invoke name=",          # MiniMax invoke
+                '"tool_calls"',           # OpenAI JSON
+                '"function_call"',        # OpenAI legacy
+                '"tool_use"',             # Anthropic
+                "tool_use",               # original v7.27-A
+            )
+            # v7.28-2: but DON'T count <think> blocks toward char watchdog
+            # (MiniMax always thinks before tool calls; can't disable via API)
+            _v728_2_in_think = "<think>" in decoded and "</think>" not in decoded
+            for _v727a_m in _v727a_tool_markers:
+                if _v727a_m in decoded:
+                    tool_use_events[0] += 1
+                    tool_use_detected.set()
+                    # v7.27-B: track chars-since-last-tool-call for frequency watchdog
+                    try:
+                        token_count[1] = 0  # reset counter at index 1
+                    except IndexError:
+                        token_count.append(0)
+                    break
 
             # v7.8: PROPER kill — Hermes is in its own session (start_new_session=True),
             # so its PGID == its PID. We kill ONLY Hermes, not agent-worker.
-            if token_count[0] > 6000 and not tool_use_detected.is_set() and not kill_event.is_set():
+            if token_count[0] > 3000 and not tool_use_detected.is_set() and not kill_event.is_set():
                 hpid = hermes_pid_holder[0] if hermes_pid_holder else None
                 if hpid:
                     try:
@@ -650,10 +728,21 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
             # Check if kill event or process exited
             if kill_event.is_set():
                 break
-            # Check if child process exited
+            # v7.23-B: NO-OUTPUT wall-clock watchdog
             try:
-                # This is a placeholder — actual pid tracking done in run_hermes_pty
-                pass
+                import time as _v723b_time
+                if session_start_t > 0:
+                    _v723b_elapsed = _v723b_time.time() - session_start_t
+                    if _v723b_elapsed > no_output_kill_seconds and len(output_chunks) == 0 and not kill_event.is_set():
+                        _v723b_hpid = hermes_pid_holder[0] if hermes_pid_holder else None
+                        if _v723b_hpid:
+                            try:
+                                os.killpg(os.getpgid(_v723b_hpid), signal.SIGKILL)
+                                print(f"[{AGENT}] WATCHDOG-NOOUT: SIGKILL Hermes pid={_v723b_hpid} after {_v723b_elapsed:.0f}s with 0 output chars")
+                            except (ProcessLookupError, PermissionError) as _v723b_ke:
+                                print(f"[{AGENT}] WATCHDOG-NOOUT: kill failed: {_v723b_ke}")
+                        kill_event.set()
+                        break
             except Exception:
                 pass
 
@@ -667,8 +756,23 @@ def run_hermes_pty(task: str, agent_name: str, gap_id: str = None,
     If >4000 tokens with 0 tool_use events → SIGTERM and retry once.
 
     Falls back to subprocess.run if PTY unavailable.
+
+    v7.19: wrapped with trace_hermes_call so every Hermes invocation is logged
+    to Langfuse as a generation observation with tool_use count + exit code.
     """
     import signal as _signal
+    # v7.19: open Langfuse generation span (no-op if Langfuse disabled)
+    _v719_span_cm = None
+    _v719_span = None
+    try:
+        if _V719_LF_OK:
+            _v719_span_cm = _v719_lf_hermes(agent_name, "MiniMax-M2.7",
+                                             prompt_chars=len(task or ""),
+                                             gap_id=gap_id or "",
+                                             trace_id=trace_id)
+            _v719_span = _v719_span_cm.__enter__()
+    except Exception as _v719_e:
+        _v719_span_cm = None
 
     profile = get_profile_name()
 
@@ -704,7 +808,7 @@ For tests: cat test-cases.md, run test commands, file_write results.json with ev
 When done: agent send orchestrator "<subject> <body>".
 Heartbeat: /usr/local/bin/agent-heartbeat {agent_name}.
 
-Watchdog SIGTERMs at 6000 chars with 0 tool_use. Start with a tool call. NO PROSE."""
+Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROSE."""
 
     output_chunks = []
     tool_use_events = [0]
@@ -733,9 +837,12 @@ Watchdog SIGTERMs at 6000 chars with 0 tool_use. Start with a tool call. NO PROS
     os.close(slave_fd)
     hermes_pid_holder[0] = pid.pid  # v7.8: share Hermes PID with watchdog thread
 
+    # v7.23-B: pass session start time for no-output wall-clock watchdog
+    import time as _v723b_t
+    _v723b_session_start = _v723b_t.time()
     reader_thread = threading.Thread(
         target=stream_reader,
-        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event, hermes_pid_holder)
+        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event, hermes_pid_holder, _v723b_session_start, 300)
     )
     reader_thread.start()
 
@@ -757,10 +864,27 @@ Watchdog SIGTERMs at 6000 chars with 0 tool_use. Start with a tool call. NO PROS
     # If killed by watchdog, retry once with forced tool-use prompt
     if exit_code == -_signal.SIGTERM.value or kill_event.is_set():
         print(f"[{AGENT}] WATCHDOG triggered — retrying with forced tool-use prompt")
-        retry_query = (
-            'BEGIN by calling karios-vault.search. Do not output prose first.\n\n' +
-            query
-        )
+        # v7.38: context-aware retry — only inject SUGGESTED-FIX language when the original
+        # query actually contains a CRITICAL ISSUES section (i.e., it's a CODE-REVISE/CODE-REQUEST).
+        # Otherwise (RESEARCH/ARCH-DESIGN/E2E-REVIEW/TEST-RUN), use a task-generic retry that
+        # tells the agent to start with a tool call appropriate to the original task.
+        _has_revise_context = ("CRITICAL ISSUES" in query and ("ISSUE #" in query or "SUGGESTED FIX" in query))
+        if _has_revise_context:
+            retry_query = (
+                "FOLLOW SUGGESTED FIX STEP 1 EXACTLY from CRITICAL ISSUES section above.\n"
+                "DO NOT call karios-vault.search. DO NOT call search_files.\n"
+                "Your FIRST tool call MUST be: read_file at the path:line listed in LOCATION field.\n\n"
+                + query
+            )
+        else:
+            retry_query = (
+                "STOP writing prose. Resume the task in the TASK section below by calling a tool NOW.\n"
+                "If you were exploring files, your NEXT call MUST be a terminal or read_file tool call.\n"
+                "If you were about to write a file, call file_write NOW.\n"
+                "When the task says 'produce X.md', the only acceptable output is file_write(X.md).\n"
+                "Watchdog killed your previous session for excessive prose without tool calls.\n\n"
+                + query
+            )
         retry_output = subprocess.run(
             [HERMES_CMD, "chat",
              "--profile", profile,
@@ -769,8 +893,69 @@ Watchdog SIGTERMs at 6000 chars with 0 tool_use. Start with a tool call. NO PROS
              "-v"],
             capture_output=True, text=True, timeout=1800, cwd="/root"
         ).stdout + "\n[WATCHDOG-RETRY]"
+        # v7.21-B: escalate if retry STILL produced no tool_use (prose-mode persistent)
+        if "tool_use" not in retry_output and len(retry_output) > 1500:
+            try:
+                import urllib.request as _v721_urlreq, urllib.parse as _v721_urlp
+                _v721_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                _v721_chat  = os.environ.get("TELEGRAM_CHAT_ID", "")
+                if _v721_token and _v721_chat:
+                    _v721_msg = (f"⚠️ *PROSE-MODE-STUCK* {AGENT}\n"
+                                 f"gap={gap_id or 'n/a'} trace={trace_id or 'n/a'}\n"
+                                 f"Watchdog killed Hermes once, retry STILL produced "
+                                 f"{len(retry_output)} chars with 0 tool_use events.\n"
+                                 f"Manual intervention recommended.")
+                    _v721_data = _v721_urlp.urlencode({
+                        "chat_id": _v721_chat,
+                        "text": _v721_msg,
+                        "parse_mode": "Markdown",
+                    }).encode()
+                    _v721_url = f"https://api.telegram.org/bot{_v721_token}/sendMessage"
+                    _v721_urlreq.urlopen(_v721_url, data=_v721_data, timeout=5)
+                    print(f"[{AGENT}] v7.21-B prose-mode-stuck escalated to Telegram")
+            except Exception as _v721_e:
+                print(f"[{AGENT}] v7.21-B telegram escalate failed: {_v721_e}")
+            # Write critique
+            try:
+                subprocess.run(
+                    ["/usr/local/bin/karios-vault", "critique",
+                     "--agent", AGENT,
+                     "--failed", "PROSE-MODE-PERSISTENT — watchdog kill + retry both produced no tool_use",
+                     "--task", (task or "")[:200],
+                     "--trace", trace_id or "unknown"],
+                    capture_output=True, timeout=10
+                )
+            except Exception:
+                pass
+        # v7.19: close Langfuse span with retry metadata
+        try:
+            if _v719_span is not None:
+                _v719_span.update(output={"chars": len(retry_output),
+                                           "tool_use_events": tool_use_events[0],
+                                           "exit_code": exit_code,
+                                           "watchdog_retry": True})
+        except Exception:
+            pass
+        try:
+            if _v719_span_cm is not None:
+                _v719_span_cm.__exit__(None, None, None)
+        except Exception:
+            pass
         return retry_output
 
+    # v7.19: normal-return — close Langfuse span with success metadata
+    try:
+        if _v719_span is not None:
+            _v719_span.update(output={"chars": len(full_output),
+                                       "tool_use_events": tool_use_events[0],
+                                       "exit_code": exit_code})
+    except Exception:
+        pass
+    try:
+        if _v719_span_cm is not None:
+            _v719_span_cm.__exit__(None, None, None)
+    except Exception:
+        pass
     return full_output
 
 
@@ -1196,6 +1381,14 @@ def main():
     global _stream_thread, _stop_stream
 
     print(f"[{AGENT}] Agent worker v3.0 starting...")
+    # v7.18: Reap orphaned Hermes processes for this profile before subscribing to streams
+    if _v718_reap is not None:
+        try:
+            _n = _v718_reap(AGENT)
+            if _n:
+                print(f"[{AGENT}] v7.18 zombie-reaper: cleaned {_n} orphaned Hermes process(es)")
+        except Exception as _e:
+            print(f"[{AGENT}] v7.18 zombie-reaper failed: {_e}")
     print(f"[{AGENT}] Improvements: Streams, Streaming, Checkpoints, Agent Memory")
 
     # Initialize CheckpointService for step-level Redis checkpointing
