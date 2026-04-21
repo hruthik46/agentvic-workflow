@@ -2729,7 +2729,9 @@ def handle_arch_complete(gap_id: str, iteration: int, body: str, trace_id: str =
     if output_verifier is not None:
         context = {"gap_id": gap_id, "trace_id": tid, "step_id": "design_overview",
                    "expected_files": 1, "files_created": ["architecture.md"]}
-        result = output_verifier.verify(body, context)
+        # v7.67: verify actual on-disk file, not the short notification body (v7.43 preserves the full file)
+        _verify_content = arch_md.read_text() if arch_md.exists() else (body or "")
+        result = output_verifier.verify(_verify_content, context)
         decision = output_verifier.gatekeeper_decision(result)
         print(f"[dispatcher] Architecture output verification: passed={result.passed}, score={result.score}, decision={decision}")
         if decision == "rewind":
@@ -2985,6 +2987,11 @@ def parse_message(msg_id: str, data: dict):
     if not valid and not LOG_ONLY_MODE:
         # Iteration 2: quarantine and reject
         print(f"[dispatcher] SCHEMA VIOLATION rejected: {reason} from {sender} (trace={trace_id})")
+        return
+
+    # v7.67: drop empty-subject messages (sent by agents with no HERMES_AGENT set, or blank stream entries)
+    if not subject or not subject.strip():
+        print(f"[dispatcher] DROP empty subject from {sender} (trace={trace_id})")
         return
 
     print(f"[dispatcher] ← {sender}: {subject} (trace={trace_id})")
