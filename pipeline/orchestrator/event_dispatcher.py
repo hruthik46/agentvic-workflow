@@ -1800,7 +1800,8 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
         f'    {{"gap_id":"{gap_id}","iteration":{iteration},"rating":N,"critical_issues":[...],"dimensions":{{"correctness":N,"completeness":N,"feasibility":N,"security":N,"testability":N,"resilience":N}},"adversarial_test_cases":{{...}},"recommendation":"APPROVE|REQUEST_CHANGES|REJECT","summary":"...","trace_id":"{tid}"}}\n'
         f"STEP 5 (bash): emit [ARCH-REVIEWED] with the review JSON in body:\n"
         f"    /usr/local/bin/agent-stream-progress '{tid}' '[ARCH-REVIEWED] {gap_id} iteration {iteration}'\n"
-        f"    then send the full JSON via: agent send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\" < review.json\n\n"
+        f"    then send signal: agent msg send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
+        f"    (dispatcher reads review.json from disk automatically — do NOT pipe JSON into the command)\n\n"
         f"DO NOT WRITE PROSE. Each output MUST be a tool call. Watchdog kills prose-only sessions at 6000 chars.\n"
         f"Your role doc is at ~/.hermes/profiles/architect-blind-tester/SOUL.md — consult it only if needed via read_file."
 )
@@ -1816,7 +1817,8 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
                        dimensions: dict = None,
                        adversarial_test_cases: dict = None,
                        recommendation: str = "REQUEST_CHANGES",
-                       trace_id: str = None):
+                       trace_id: str = None,
+                       evidence: dict = None):
     """Process Architect-Blind-Tester review result with dynamic routing + checkpoint.
     
     v4.0: Now accepts dimensions, adversarial_test_cases, and recommendation from
@@ -1825,7 +1827,7 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
     """
     # v7.50: real-env evidence gate
     _v750_review = {"rating": rating, "critical_issues": critical_issues,
-                    "evidence": {}, "summary": summary, "recommendation": recommendation}
+                    "evidence": evidence or {}, "summary": summary, "recommendation": recommendation}  # v7.65: use actual evidence
     _v750_ok, _v750_reason = _v750_gate_arch(_v750_review)
     if not _v750_ok:
         print(f"[dispatcher] v7.50 GATE-REJECT arch review for {gap_id}: {_v750_reason}")
@@ -1834,9 +1836,24 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
         except Exception:
             pass
         try:
+            _gate_issues = format_critical_issues_for_revise(critical_issues, kind="arch") if critical_issues else "(none from previous review)"
             send_to_agent("architect-blind-tester",
                           f"[ARCH-BLIND-REVIEW] {gap_id} iteration {iteration} (RETRY: real probes missing)",
-                          f"v7.50 gate refused. Run >=3 real-env probes (govc/curl/ssh against 192.168.115.233/232/23, 192.168.118.202, 192.168.118.106:8089) BEFORE writing review.json. evidence.real_env_probes is mandatory.",
+                          f"GATE REJECT: {_v750_reason}\n\n"
+                          f"=== MANDATORY NUMBERED STEPS ===\n"
+                          f"STEP 1: Read docs at /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/\n"
+                          f"STEP 2: Run >=3 real-env probes via bash tool (REQUIRED before writing review.json):\n"
+                          f"  curl -sk http://192.168.118.106:8089/api/v1/migrations 2>&1 | head -20\n"
+                          f"  curl -sk http://192.168.118.106:8089/api/v1/stub/ok 2>&1\n"
+                          f"  redis-cli -s /var/run/redis/redis.sock ping\n"
+                          f"  govc -u root:karios@12345@192.168.115.233 -k about 2>&1 | head -5\n"
+                          f"  curl -sk https://192.168.118.202/client/api 2>&1 | head -5\n"
+                          f"STEP 3: Write review.json to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/review.json\n"
+                          f"  evidence.real_env_probes MUST be a JSON array: [{{\"command\": \"...\", \"stdout_excerpt\": \"...actual output\"}}]\n"
+                          f"STEP 4: EXACT send command: agent msg send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
+                          f"  (do NOT pipe JSON — dispatcher reads review.json from disk)\n\n"
+                          f"=== PREVIOUS CRITICAL ISSUES (score these) ===\n"
+                          f"{_gate_issues}",
                           gap_id=gap_id, trace_id=trace_id, priority="high")
         except Exception as _e:
             print(f"[dispatcher] v7.50 retry dispatch failed: {_e}")
@@ -1948,7 +1965,11 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                       f"[ARCH-FAST-TRACK] {gap_id} — rating {rating} ≥ {ROUTING_FAST_TRACK}, final iteration",
                       f"Excellent architecture (rating={rating}/10).\n"
                       f"Minor issues to address:\n" + "\n".join(f"- {i}" for i in critical_issues) + "\n\n"
-                      f"One final iteration to address these quickly, then proceed to coding.")
+                      f"One final iteration to address these quickly, then proceed to coding.\n\n"
+                      f"OUTPUT: Write ALL 5 docs to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration + 1}/\n"
+                      f"  - architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md\n"
+                      f"Then: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {iteration + 1}'",
+                      gap_id=gap_id, trace_id=tid)
         print(f"[dispatcher] Gap {gap_id} FAST-TRACK: rating {rating} >= {ROUTING_FAST_TRACK}")
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
@@ -1979,11 +2000,20 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                              self_diagnosis=strategy)
             update_agent_checkpoint("architect", phase="phase-2-arch", iteration=next_iter,
                                     rating=rating, self_diagnosis=strategy, trace_id=tid)
+            _swe_issues = format_critical_issues_for_revise(critical_issues, kind="arch")
             send_to_agent("architect",
                           f"[ARCH-ITERATE] {gap_id} — self-correct iteration {next_iter}",
                           f"⚠️ {strategy}\n\n"
-                          f"Issues to fix:\n" + "\n".join(f"- {i}" for i in critical_issues) + "\n\n"
-                          f"Extra iteration granted for self-correction. Iteration: {next_iter}/11")
+                          f"ITERATION {next_iter}/{11} — Previous rating: {rating}/10\n\n"
+                          f"=== CRITICAL ISSUES (fix ALL before submitting) ===\n"
+                          f"{_swe_issues}\n\n"
+                          f"=== NUMBERED STEPS ===\n"
+                          f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
+                          f"STEP 2: For each CRITICAL issue above, edit the doc at LOCATION with the SUGGESTED FIX\n"
+                          f"STEP 3: Write ALL 5 updated docs to iteration-{next_iter}/ (architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md)\n"
+                          f"STEP 4: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
+                          f"  (EXACT command — do NOT use 'agent send', do NOT pipe JSON)\n",
+                          gap_id=gap_id, trace_id=tid)
             print(f"[dispatcher] Gap {gap_id} self-correcting: {strategy}")
 
     else:
@@ -1992,13 +2022,19 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                          last_rating=rating, last_issues=critical_issues)
         update_agent_checkpoint("architect", phase="phase-2-arch", iteration=next_iter,
                                 rating=rating, trace_id=tid)
+        _swe_issues_else = format_critical_issues_for_revise(critical_issues, kind="arch")
         send_to_agent("architect",
                       f"[ARCH-ITERATE] {gap_id} — iteration {next_iter}",
-                      f"Architecture iteration {iteration} scored {rating}/10.\n\n"
-                      f"Critical issues:\n" + "\n".join(f"- {i}" for i in critical_issues) + "\n\n"
-                      f"Fix these issues and create updated architecture docs.\n"
-                      f"Iteration: {next_iter}/10\n"
-                      f"trace_id: {tid}")
+                      f"ITERATION {next_iter}/10 — Previous rating: {rating}/10\n\n"
+                      f"=== CRITICAL ISSUES (SWE-bench format — fix ALL) ===\n"
+                      f"{_swe_issues_else}\n\n"
+                      f"=== NUMBERED STEPS ===\n"
+                      f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
+                      f"STEP 2: For each CRITICAL issue above, locate LOCATION in the doc and apply SUGGESTED FIX\n"
+                      f"STEP 3: Write ALL 5 updated docs to iteration-{next_iter}/ (architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md)\n"
+                      f"STEP 4: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
+                      f"  (EXACT command — do NOT use 'agent send', do NOT pipe JSON)",
+                      gap_id=gap_id, trace_id=tid)
         print(f"[dispatcher] Gap {gap_id} arch loop iteration {next_iter} (prev rating {rating}/10)")
 
 def submit_code_for_test(gap_id: str, iteration: int, trace_id: str = None):
@@ -2051,7 +2087,7 @@ def _v750_gate_arch(review):
         return True, "skip-gate-no-evidence-dict"
     probes = ev.get("real_env_probes") or []
     if len(probes) == 0:
-        return True, "skip-gate-no-probes-field"
+        return False, "evidence.real_env_probes missing or empty — v7.50 mandate requires >=3 real env probes"  # v7.65
     if len(probes) < REAL_ENV_PROBE_MIN_ARCH:
         return False, "only " + str(len(probes)) + " probes need >=" + str(REAL_ENV_PROBE_MIN_ARCH)
     for i, p in enumerate(probes):
@@ -2067,7 +2103,7 @@ def _v750_gate_e2e(review):
         return True, "skip-gate-no-evidence-dict"
     probes = ev.get("live_api_probes") or []
     if len(probes) == 0:
-        return True, "skip-gate-no-probes-field"
+        return False, "evidence.live_api_probes missing or empty — v7.50 mandate requires >=1 live API probe"  # v7.65
     targets_hit = any("192.168.118.106" in str(p) or "8089" in str(p) for p in probes)
     if not targets_hit:
         return False, "no probe hit live backend 192.168.118.106:8089"
@@ -2079,7 +2115,8 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                        dimensions: dict = None,
                        adversarial_tests: dict = None,
                        recommendation: str = "REQUEST_CHANGES",
-                       trace_id: str = None):
+                       trace_id: str = None,
+                       evidence: dict = None):
     """Process Code-Blind-Tester E2E results with dynamic routing.
     
     v4.0: Now accepts dimensions (7 testing dimensions), adversarial_tests
@@ -2088,7 +2125,7 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
     """
     # v7.50: live-API evidence gate
     _v750_review = {"rating": rating, "critical_issues": critical_issues,
-                    "evidence": {}, "summary": ""}
+                    "evidence": evidence or {}, "summary": ""}  # v7.65: use actual evidence
     _v750_ok, _v750_reason = _v750_gate_e2e(_v750_review)
     if not _v750_ok:
         print(f"[dispatcher] v7.50 GATE-REJECT e2e for {gap_id}: {_v750_reason}")
@@ -2222,7 +2259,8 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                          last_rating=rating, last_issues=critical_issues, fast_tracked=True)
         send_to_agent("devops",
                       f"[FAST-REDEPLOY] {gap_id}",
-                      f"E2E rating {rating} ≥ {ROUTING_FAST_TRACK}. Quick final check, then deploy to prod.")
+                      f"E2E rating {rating} ≥ {ROUTING_FAST_TRACK}. Quick final check, then deploy to prod.",
+                      gap_id=gap_id, trace_id=tid)  # v7.64: add missing kwargs
         print(f"[dispatcher] Gap {gap_id} E2E FAST-TRACK: rating {rating}")
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
@@ -3205,10 +3243,11 @@ def parse_message(msg_id: str, data: dict):
                 notify_phase_transition(gid, "architect-blind-tester", _next,
                                         "ARCH-REVIEWED", rating=_r,
                                         summary=f"recommendation={_rec}; {review.get('summary', '')[:140]}")
-                if "rating" not in review:
+                if "rating" not in review and review.get("recommendation") != "APPROVE":
                     print(f"[dispatcher] WARN: arch review missing rating; dropping. body={body[:120]}")
                 else:
-                    handle_arch_review(gid, iteration, review["rating"],
+                    _arch_rating = review.get("rating") or (8 if review.get("recommendation") == "APPROVE" else 0)
+                    handle_arch_review(gid, iteration, _arch_rating,
                                       review.get("critical_issues", []),
                                       review.get("summary", ""),
                                       review.get("dimensions", {}),
@@ -3236,13 +3275,15 @@ def parse_message(msg_id: str, data: dict):
                                 _v738_text = _m_fb2.group(0)
                         review = json.loads(_v738_text)
                         print(f"[dispatcher] v7.38 disk fallback: loaded {_v738_latest} for {gid}")
-                        handle_arch_review(gid, iteration, review.get("rating", 0),
+                        _fb_rating = review.get("rating") or (8 if review.get("recommendation") == "APPROVE" else 0)
+                        handle_arch_review(gid, iteration, _fb_rating,
                                            review.get("critical_issues", []),
                                            review.get("summary", ""),
                                            review.get("dimensions", {}),
                                            review.get("adversarial_test_cases", {}),
                                            review.get("recommendation", "REQUEST_CHANGES"),
-                                           trace_id=review.get("trace_id") or trace_id)
+                                           trace_id=review.get("trace_id") or trace_id,
+                                           evidence=review.get("evidence", {}))  # v7.65
                     else:
                         print(f"[dispatcher] v7.38 disk fallback: no review.json under {_v738_root}")
                         try:
@@ -3337,7 +3378,8 @@ def parse_message(msg_id: str, data: dict):
                                                     _v721_data.get("dimensions", {}),
                                                     _v721_data.get("adversarial_tests", {}),
                                                     _v721_data.get("recommendation", "REQUEST_CHANGES"),
-                                                    trace_id=trace_id)
+                                                    trace_id=trace_id,
+                                                    evidence=_v721_data.get("evidence", {}))
                                 # v7.33: re-dispatch fresh [E2E-REVIEW] + [TEST-RUN] using v7.31 detailed
                                 # prompt template so testers produce v7.32-schema results next iteration.
                                 # Without this, cbt keeps re-using its OLD generic prompt from a stale
@@ -3396,7 +3438,17 @@ def parse_message(msg_id: str, data: dict):
                 # signal. Pipeline should wait for backend to actually ship code (commit_sha=)
                 # before testers run.
                 import re as _v754_re
-                if not _v754_re.search(r"commit_sha=[0-9a-f]{7,40}\b", (body or "") + " " + (subject or "")):  # v7.60: also check subject
+                import re as _v763_re
+                _v763_has_commit = bool(_v754_re.search(r"commit_sha=[0-9a-f]{7,40}\b", (body or "") + " " + (subject or "")))
+                if not _v763_has_commit:
+                    # v7.63: also accept if commit_sha was stored from earlier CODING-COMPLETE
+                    _v763_gdata = load_gap(gap_id) or {}
+                    _v763_stored = _v763_gdata.get("commit_shas", {})
+                    _v763_synced = set(_v763_gdata.get("api_sync_confirmed", []))
+                    if _v763_stored and {"backend", "frontend"}.issubset(_v763_synced):
+                        print(f"[dispatcher] v7.63: api_sync_confirmed complete + stored commits {_v763_stored} — advancing despite no commit_sha in COMPLETE")
+                        _v763_has_commit = True  # bypass gate: API-SYNC confirmed + commits on record
+                if not _v763_has_commit:
                     print(f"[dispatcher] v7.54 [COMPLETE] {n_phase} from {sender} for {gap_id} — no commit_sha in body, NOT advancing to Phase 4 testing (waiting for [CODING-COMPLETE])")
                     return
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
@@ -3500,7 +3552,34 @@ def parse_message(msg_id: str, data: dict):
                 else:
                     print(f"[dispatcher] COMPLETE handler: no transition for {gap_id} {phase} (current={current_phase}; normalized {n_phase}/{n_current})")
         else:
-            print(f"[dispatcher] ← [COMPLETE] but no gap_id in body: {body[:100]}")
+            # v7.65: try extracting gap_id from subject (file inbox sets gap_id=None)
+            import re as _v765_re
+            _v765_m = _v765_re.search(r"(ARCH-IT-[0-9]+|REQ-[0-9]+|GAP-[0-9A-Z]+)", subject or "")
+            if _v765_m:
+                gap_id = _v765_m.group(1)
+                print(f"[dispatcher] v7.65: extracted gap_id={gap_id} from subject for [COMPLETE] handler")
+                # Re-run transition logic with recovered gap_id
+                _v765_gap = load_gap(gap_id) or {}
+                _v765_phase = _v765_gap.get("phase", "")
+                _v765_state = _v765_gap.get("state", "active")
+                if _v765_state in ("completed", "closed", "cancelled"):
+                    print(f"[dispatcher] v7.65 DROP [COMPLETE] from {sender} for {gap_id}: state={_v765_state} (terminal)")
+                else:
+                    print(f"[dispatcher] v7.65 [COMPLETE] from {sender} for {gap_id} phase={_v765_phase} — recovered from subject, handling normally")
+                    # Dispatch back into subject handler with recovered gap_id
+                    import threading as _v765_t
+                    _v765_inj = {"from": sender, "message": (subject or "") + "\n" + (body or "")}
+                    try:
+                        from pathlib import Path as _v765_P
+                        import time as _v765_time, uuid as _v765_uuid
+                        _v765_inj_path = _v765_P("/var/lib/karios/agent-msg/inbox/orchestrator") / f"v765-recover-{int(_v765_time.time())}-{_v765_uuid.uuid4().hex[:6]}.json"
+                        import json as _v765_json
+                        _v765_inj_path.write_text(_v765_json.dumps({"from": sender, "message": (subject or "") + "\n" + (body or ""), "gap_id": gap_id, "trace_id": trace_id or "", "priority": "high"}))
+                        print(f"[dispatcher] v7.65: re-injected [COMPLETE] with gap_id={gap_id} for next loop")
+                    except Exception as _v765_e:
+                        print(f"[dispatcher] v7.65 re-inject failed: {_v765_e}")
+            else:
+                print(f"[dispatcher] ← [COMPLETE] but no gap_id in body: {body[:100]}")
         return
 
     # ── Coding complete / FAN-IN ──────────────────────────────────────────
@@ -3561,6 +3640,15 @@ def parse_message(msg_id: str, data: dict):
                 print(f"[dispatcher] CODING-COMPLETE accepted (warn): {sender} skipped code_review_graph but shipped real commit")
                 telegram_alert(f"⚠ {gid}: {sender} shipped real commit but skipped code-review-graph rubric. Acceptable but suboptimal.")
 
+
+        # v7.62: persist commit_sha so v7.54 gate can look it up later
+        import re as _v762_re
+        _v762_m = _v762_re.search(r"commit_sha=([0-9a-f]{7,40})", (body or "") + " " + (subject or ""))
+        if _v762_m:
+            _v762_g = load_gap(gid) or {}
+            _v762_g.setdefault("commit_shas", {})[sender] = _v762_m.group(1)
+            save_gap(gid, _v762_g)
+            print(f"[dispatcher] v7.62: stored commit_sha={_v762_m.group(1)} for {gid}/{sender}")
         if gap_data.get("iteration", 0) > 0:
             iteration = gap_data["iteration"]
         agent = sender
@@ -3594,10 +3682,18 @@ def parse_message(msg_id: str, data: dict):
         gid = subject.split("]")[1].strip().split(":")[0].strip()
         agent = sender
         gap_data = load_gap(gid)
-        sync_confirmed = set(gap_data.get("api_sync_confirmed", []))
-        sync_confirmed.add(agent)
-        gap_data["api_sync_confirmed"] = list(sync_confirmed)
-        save_gap(gid, gap_data)
+        # v7.64: atomic read-modify-write to avoid race when both agents confirm simultaneously
+        for _v764_retry in range(3):
+            gap_data = load_gap(gid)  # reload inside loop to get latest saved state
+            sync_confirmed = set(gap_data.get("api_sync_confirmed", []))
+            sync_confirmed.add(agent)
+            gap_data["api_sync_confirmed"] = list(sync_confirmed)
+            save_gap(gid, gap_data)
+            # Verify write persisted (guards against concurrent overwrites)
+            _v764_check = set(load_gap(gid).get("api_sync_confirmed", []))
+            if agent in _v764_check:
+                sync_confirmed = _v764_check  # use freshest confirmed set
+                break
         remaining = {"backend", "frontend"} - sync_confirmed
         print(f"[dispatcher] API-SYNC: {agent} confirmed for {gid}. Still pending: {remaining}")
         if not remaining:
@@ -3659,7 +3755,8 @@ def parse_message(msg_id: str, data: dict):
             send_to_agent("devops",
                           f"[DEPLOY] {next_deploy['gap_id']} — next queued deploy",
                           f"Next queued gap: {next_deploy['gap_id']} iteration {next_deploy['iteration']}.\n"
-                          f"Deploy to staging and notify: [STAGING-DEPLOYED] {next_deploy['gap_id']} iteration {next_deploy['iteration']}")
+                          f"Deploy to staging and notify: [STAGING-DEPLOYED] {next_deploy['gap_id']} iteration {next_deploy['iteration']}",
+                          gap_id=next_deploy['gap_id'], trace_id=new_trace_id(next_deploy['gap_id'], "orchestrator", "queue_deploy"))  # v7.64
         submit_code_for_test(gid, iteration)
         return
 
@@ -3836,7 +3933,8 @@ def parse_message(msg_id: str, data: dict):
                               results.get("dimensions", {}),
                               results.get("adversarial_tests", {}),
                               results.get("recommendation", "REQUEST_CHANGES"),
-                              trace_id=results.get("trace_id") or trace_id)
+                              trace_id=results.get("trace_id") or trace_id,
+                              evidence=results.get("evidence", {}))
         except json.JSONDecodeError:
             # v7.20: disk fallback — agent may have emitted bare subject without piping JSON
             print(f"[dispatcher] WARN: E2E-RESULTS body unparseable, trying disk fallback for {gid}")
@@ -3876,7 +3974,8 @@ def parse_message(msg_id: str, data: dict):
                                        results.get("dimensions", {}),
                                        results.get("adversarial_tests", {}),
                                        results.get("recommendation", "REQUEST_CHANGES"),
-                                       trace_id=results.get("trace_id") or trace_id)
+                                       trace_id=results.get("trace_id") or trace_id,
+                                       evidence=results.get("evidence", {}))
                     return
                 else:
                     print(f"[dispatcher] v7.20 disk fallback: no e2e-results.json under {_v720_root}")
