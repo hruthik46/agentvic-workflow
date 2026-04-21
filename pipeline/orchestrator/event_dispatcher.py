@@ -3302,15 +3302,14 @@ def parse_message(msg_id: str, data: dict):
             if n_phase in ("1-research", "1-research-pre") and n_current == "1-research":
                 advance_to_arch_loop(gap_id, iteration, body, trace_id=trace_id)
             elif n_phase in ("2-arch-loop", "2-architecture") and n_current in ("2-arch-loop", "2-architecture"):
-                # v7.40: do NOT auto-transition to 3-coding here. The [ARCH-REVIEWED] handler
-                # owns the rating-aware decision (advance vs revise vs escalate). This [COMPLETE]
-                # is just architect-blind-tester acknowledging it finished — phase stays under
-                # the ARCH-REVIEWED handler control. Otherwise we race the self-correction path
-                # and clobber a pending [ARCH-ITERATE] iter dispatch.
-                if sender in ("architect-blind-tester", "architect_blind_tester", "blind-tester"):
-                    print(f"[dispatcher] v7.40 [COMPLETE] from blind-tester for {gap_id} 2-arch-loop — acknowledged, no phase change (ARCH-REVIEWED owns routing)")
-                else:
-                    transition_phase(gap_id, "3-coding", iteration=iteration, trace_id=trace_id)
+                # v7.40 + v7.52: do NOT auto-transition to 3-coding for ANY [COMPLETE] sender
+                # in 2-arch-loop. The [ARCH-COMPLETE] handler owns architect->blind-test handoff,
+                # and [ARCH-REVIEWED] handler owns rating->Phase 3 promotion. A bare [COMPLETE]
+                # is just the worker session ending — could be mid-task, mid-watchdog-kill, or
+                # premature exit. Acknowledging it without advancing prevents Phase 3 dispatches
+                # with NO arch docs (v7.52 RCA: ARCH-IT-054 jumped to 3-coding with empty
+                # phase-2-arch-loop dir because architect emitted bare [COMPLETE] phase=2-arch-loop).
+                print(f"[dispatcher] v7.52 [COMPLETE] from {sender} for {gap_id} 2-arch-loop — acknowledged, no phase change ([ARCH-COMPLETE]/[ARCH-REVIEWED] own routing)")
             elif n_phase == "3-coding" and n_current in ("3-coding", "2-arch-loop", "2-architecture"):
                 # v7.21-C: if recent e2e-results.json exists with rating < 8, route to CODE-REVISE
                 # instead of pointless [API-SYNC] (backend keeps prose-emitting [COMPLETE] without
