@@ -2874,21 +2874,29 @@ def parse_message(msg_id: str, data: dict):
 
     print(f"[dispatcher] ← {sender}: {subject} (trace={trace_id})")
 
-    # v7.41: top-level terminal-state guard. Drop ANY message addressed to a gap that is in
-    # active_gaps with state in (completed/closed/cancelled/escalated). Stops ghost cycles
-    # from in-flight Hermes sessions whose gaps were closed mid-flight (e.g., pre-cleanup
-    # backend that completes after queues drained → [E2E-RESULTS] / [CODE-REVISE] cascade).
-    # Allow [REQUIREMENT] and [HUMAN-MESSAGE] through (they have no gap_id yet or are admin).
-    if gap_id and not subject.startswith("[REQUIREMENT]") and not subject.startswith("[HUMAN-MESSAGE]"):
+    # v7.41 + v7.44: top-level terminal-state guard. Drop ANY message addressed to a gap
+    # in active_gaps with state in (completed/closed/cancelled/escalated).
+    # v7.44: file-inbox messages set gap_id=None explicitly; extract from subject/body
+    # as fallback (formats: "[KIND] GAP-ID iteration N", "gap_id: GAP-ID", "gap=GAP-ID").
+    _v744_check_gap = gap_id
+    if not _v744_check_gap and subject:
+        _v744_m = re.search(r"\b(ARCH-IT-\d+|REQ-\d+|TEST-FLOW-[A-Z0-9]+)\b", subject)
+        if _v744_m:
+            _v744_check_gap = _v744_m.group(1)
+    if not _v744_check_gap and body:
+        _v744_m = re.search(r"gap[_=:\s]+(ARCH-IT-\d+|REQ-\d+|TEST-FLOW-[A-Z0-9]+)", body)
+        if _v744_m:
+            _v744_check_gap = _v744_m.group(1)
+    if _v744_check_gap and not subject.startswith("[REQUIREMENT]") and not subject.startswith("[HUMAN-MESSAGE]"):
         try:
             _v741_st = load_state() or {}
-            _v741_ge = _v741_st.get("active_gaps", {}).get(gap_id, {})
+            _v741_ge = _v741_st.get("active_gaps", {}).get(_v744_check_gap, {})
             _v741_state = _v741_ge.get("state")
             if _v741_state in ("completed", "closed", "cancelled", "escalated"):
-                print(f"[dispatcher] v7.41 DROP {subject[:40]} for {gap_id}: state={_v741_state} (terminal — ghost message ignored)")
+                print(f"[dispatcher] v7.44 DROP {subject[:40]} for {_v744_check_gap}: state={_v741_state} (terminal — ghost message ignored)")
                 return
         except Exception as _v741_e:
-            print(f"[dispatcher] v7.41 state check failed (proceeding): {_v741_e}")
+            print(f"[dispatcher] v7.44 state check failed (proceeding): {_v741_e}")
 
     # v7.6 Item A: Pydantic schema validation (log-only first pass)
     if _SCHEMA_VALIDATION and subject and body:
