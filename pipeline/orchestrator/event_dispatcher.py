@@ -3291,7 +3291,19 @@ def parse_message(msg_id: str, data: dict):
                             _m_fb2 = re.search(r"\{.*\}", _v738_text, re.DOTALL)
                             if _m_fb2:
                                 _v738_text = _m_fb2.group(0)
-                        review = json.loads(_v738_text)
+                        # v7.70: sanitize embedded control chars (raw newlines inside JSON strings)
+                        try:
+                            review = json.loads(_v738_text)
+                        except json.JSONDecodeError:
+                            _v770_dec = json.JSONDecoder(strict=False)
+                            try:
+                                review, _ = _v770_dec.raw_decode(_v738_text)
+                                print(f"[dispatcher] v7.70: loaded {_v738_latest} with strict=False (had embedded control chars)")
+                            except json.JSONDecodeError:
+                                import re as _re770
+                                _clean = _re770.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', _v738_text)
+                                review = json.loads(_clean)
+                                print(f"[dispatcher] v7.70: loaded {_v738_latest} after stripping control chars")
                         print(f"[dispatcher] v7.38 disk fallback: loaded {_v738_latest} for {gid}")
                         _fb_rating = review.get("rating") or (8 if review.get("recommendation") == "APPROVE" else 0)
                         handle_arch_review(gid, iteration, _fb_rating,
