@@ -1,0 +1,397 @@
+{
+  "version": "2.0",
+  "description": "v2.0: Expanded error taxonomy with 20 error classes for adversarial testing. Integrates into tester workflow with classification prompts, self-reflection triggers, and orchestrator routing hints.",
+  "updated": "2026-04-17",
+  "categories": {
+    "off_by_one": {
+      "description": "Boundary condition errors \u2014 wrong comparison operator, list/index out of bounds",
+      "examples": [
+        "index_-1",
+        "index_out_of_bounds",
+        "loop_boundary_wrong",
+        "array_length_minus_one",
+        "gte_vs_gt",
+        "lte_vs_lt",
+        "empty_collection_edge"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must redraw the algorithm flow with exact boundary definitions",
+      "test_generation_hint": "Test: empty array, single element, max size, exactly N-1, exactly N+1"
+    },
+    "null_pointer": {
+      "description": "Null/undefined/nil not handled \u2014 missing nil checks, dereferencing nil",
+      "examples": [
+        "nil_dereference",
+        "undefined_property",
+        "null_response",
+        "missing_optional_chain",
+        "default_value_missing",
+        "optional_field_empty"
+      ],
+      "severity": "critical",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must specify ALL nil cases in edge-cases.md before retry",
+      "test_generation_hint": "Test: nil input, empty response, field removed, optional omitted"
+    },
+    "race_condition": {
+      "description": "Concurrency issues \u2014 no synchronization, shared state corrupted",
+      "examples": [
+        "concurrent_write_race",
+        "read_during_write",
+        "deadlock",
+        "livelock",
+        "toctou",
+        "double_free",
+        "use_after_free"
+      ],
+      "severity": "critical",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must redesign with explicit locking/synchronization. Escalate to Sai.",
+      "test_generation_hint": "Test: 100 concurrent requests, simultaneous cancels, parallel workers"
+    },
+    "missing_edge_case": {
+      "description": "Valid input not handled \u2014 empty, max, min, boundary values",
+      "examples": [
+        "empty_string",
+        "empty_array",
+        "max_int",
+        "min_int",
+        "negative_number",
+        "unicode_edge",
+        "very_long_input",
+        "very_short_input",
+        "whitespace_only",
+        "special_characters"
+      ],
+      "severity": "high",
+      "auto_retry": true,
+      "escalate_after_attempts": 2,
+      "resolution_strategy": "Add the missing edge case to edge-cases.md, implement handling",
+      "test_generation_hint": "Test: empty, 0, -1, 1, INT_MAX, INT_MIN, max_length, unicode, special chars"
+    },
+    "api_contract_violation": {
+      "description": "Backend/frontend API mismatch \u2014 response shape, status codes, field names",
+      "examples": [
+        "wrong_status_code",
+        "missing_field",
+        "wrong_field_type",
+        "field_name_mismatch",
+        "extra_field_unexpected",
+        "response_format_wrong",
+        "authentication_missing",
+        "rate_limit_unhandled"
+      ],
+      "severity": "critical",
+      "auto_retry": true,
+      "escalate_after_attempts": 5,
+      "resolution_strategy": "Backend and Frontend must both confirm api-contract.md alignment (API-SYNC gate)",
+      "test_generation_hint": "Test: missing field, wrong type, extra field, auth failure, rate limit"
+    },
+    "security_vulnerability": {
+      "description": "Security flaw \u2014 injection, auth bypass, data exposure, escalation",
+      "examples": [
+        "sql_injection",
+        "command_injection",
+        "path_traversal",
+        "xss",
+        "csrf_missing",
+        "auth_bypass",
+        "privilege_escalation",
+        "sensitive_data_exposed",
+        "credential_in_url",
+        "insecure_direct_object_reference",
+        "missing_authorization"
+      ],
+      "severity": "critical",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "ESCALATE IMMEDIATELY to Sai. Do not retry. This is a production security risk.",
+      "test_generation_hint": "Test: injection payloads, auth token missing, privilege escalation attempts, data exposure"
+    },
+    "memory_leak": {
+      "description": "Resource not released \u2014 memory accumulates, connections not closed",
+      "examples": [
+        "connection_leak",
+        "file_handle_leak",
+        "memory_growth",
+        "session_not_invalidated",
+        "cache_growing_unbounded",
+        "timer_not_cleared",
+        "listener_not_removed"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must redesign resource lifecycle management",
+      "test_generation_hint": "Test: long-running operation, 100 iterations, check memory/connections before and after"
+    },
+    "timeout_deadlock": {
+      "description": "Wait condition never satisfied \u2014 infinite wait, premature timeout, deadlock",
+      "examples": [
+        "infinite_wait",
+        "timeout_too_short",
+        "timeout_too_long",
+        "never_satisfied",
+        "circular_wait",
+        "resource_starvation"
+      ],
+      "severity": "high",
+      "auto_retry": true,
+      "escalate_after_attempts": 2,
+      "resolution_strategy": "Test with various timeout values. If architecturally wrong, escalate.",
+      "test_generation_hint": "Test: 1s, 5s, 10s, 30s, 60s, 5min timeouts. Test cancellation mid-operation."
+    },
+    "state_corruption": {
+      "description": "Invalid state transition \u2014 no validation, state machine broken",
+      "examples": [
+        "invalid_state_transition",
+        "missing_validation",
+        "schema_mismatch",
+        "data_inconsistency",
+        "orphaned_record",
+        "zombie_state",
+        "duplicate_entry",
+        "constraint_violation"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must define full state machine in architecture docs",
+      "test_generation_hint": "Test: invalid state transitions, concurrent state changes, schema evolution"
+    },
+    "resource_exhaustion": {
+      "description": "No limits on resource usage \u2014 memory, disk, network, CPU unbounded",
+      "examples": [
+        "unbounded_memory",
+        "unbounded_loop",
+        "disk_full",
+        "network_throttling_unhandled",
+        "max_retries_infinite",
+        "log_file_growing",
+        "temp_files_not_cleaned"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must specify resource limits and fallback behavior",
+      "test_generation_hint": "Test: 1000 items, max load, disk full, network slow, memory limit exceeded"
+    },
+    "infra": {
+      "description": "Infrastructure failure \u2014 network, disk, memory, service unavailable",
+      "examples": [
+        "network_timeout",
+        "disk_full",
+        "memory_exhausted",
+        "service_down",
+        "permission_denied",
+        "connection_refused",
+        "host_unreachable",
+        "port_unavailable"
+      ],
+      "severity": "high",
+      "auto_retry": true,
+      "escalate_after_attempts": 5,
+      "resolution_strategy": "Switch to backup resource or wait for recovery. DevOps handles infra.",
+      "test_generation_hint": "Test: kill -9 mid-operation, network partition, disk full, OOM kill"
+    },
+    "architecture": {
+      "description": "Architecture flaw \u2014 wrong approach, infeasible design, missing component",
+      "examples": [
+        "approach_wrong",
+        "missing_component",
+        "infeasible_design",
+        "wrong_abstraction",
+        "tight_coupling",
+        "circular_dependency"
+      ],
+      "severity": "medium",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Restart architecture loop with more research. Escalate to Sai if 2nd failure.",
+      "test_generation_hint": "Test: validate the architecture's assumptions on real infra before retry"
+    },
+    "coding": {
+      "description": "Implementation error \u2014 logic bug, wrong import, type mismatch, compilation error",
+      "examples": [
+        "compilation_error",
+        "logic_bug",
+        "wrong_import",
+        "type_mismatch",
+        "undefined_symbol",
+        "wrong_operator",
+        "copy_paste_error",
+        "off_by_one_impl"
+      ],
+      "severity": "medium",
+      "auto_retry": true,
+      "escalate_after_attempts": 5,
+      "resolution_strategy": "Fix specific error, redeploy to staging, re-test",
+      "test_generation_hint": "Test: compile/check types, verify logic with known inputs"
+    },
+    "testing": {
+      "description": "Test suite issue \u2014 flaky test, missing coverage, assertion error in tests",
+      "examples": [
+        "flaky_test",
+        "missing_coverage",
+        "test_timeout",
+        "assertion_error",
+        "test_data_stale",
+        "mock_not_reset",
+        "test_interference"
+      ],
+      "severity": "low",
+      "auto_retry": true,
+      "escalate_after_attempts": 2,
+      "resolution_strategy": "Fix test or implementation. If test is wrong, fix test first.",
+      "test_generation_hint": "Re-run tests multiple times to detect flakiness. Check test isolation."
+    },
+    "deployment": {
+      "description": "Deployment failure \u2014 rollback required, config error, health check failed",
+      "examples": [
+        "deploy_failed",
+        "rollback_required",
+        "config_error",
+        "health_check_failed",
+        "dependency_missing",
+        "startup_crash",
+        "migration_script_failed"
+      ],
+      "severity": "high",
+      "auto_retry": true,
+      "escalate_after_attempts": 5,
+      "resolution_strategy": "Rollback to previous known-good state. DevOps handles. Retry or escalate.",
+      "test_generation_hint": "Test: clean deploy, upgrade deploy, rollback, restart mid-operation"
+    },
+    "ambiguity": {
+      "description": "Requirement ambiguity \u2014 unclear spec, conflicting requirements, missing context",
+      "examples": [
+        "requirement_unclear",
+        "conflicting_specs",
+        "missing_context",
+        "unknown_gap_type",
+        "contradictory_requirements",
+        "incomplete_spec"
+      ],
+      "severity": "critical",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "ESCALATE IMMEDIATELY to Sai. Cannot proceed without clarification.",
+      "test_generation_hint": "Flag as BLOCKING \u2014 no testing possible until ambiguity resolved"
+    },
+    "access": {
+      "description": "Access/credentials issue \u2014 credentials missing, network blocked, firewall reject",
+      "examples": [
+        "credentials_missing",
+        "network_blocked",
+        "firewall_reject",
+        "api_key_missing",
+        "permission_blocked",
+        "token_expired",
+        "certificate_invalid"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "ESCALATE IMMEDIATELY to Sai. Needs human to provide/fix credentials.",
+      "test_generation_hint": "Test: expired token, wrong credentials, network partition, firewall block"
+    },
+    "rollback_plan_missing": {
+      "description": "No rollback strategy defined \u2014 if this fails, there's no recovery plan",
+      "examples": [
+        "no_rollback_steps",
+        "backup_not_taken",
+        "snapshot_not_created",
+        "migration_path_irreversible"
+      ],
+      "severity": "high",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "Architect must define rollback plan in deployment-plan.md before retry",
+      "test_generation_hint": "Simulate failure at each step and verify rollback works"
+    },
+    "data_loss_risk": {
+      "description": "Operation can lose data \u2014 no durability guarantees, partial writes",
+      "examples": [
+        "no_transaction",
+        "partial_write",
+        "no_idempotency",
+        "source_deleted_before_copy",
+        "overwrite_without_backup",
+        "no_atomicity"
+      ],
+      "severity": "critical",
+      "auto_retry": false,
+      "escalate_after_attempts": 1,
+      "resolution_strategy": "ESCALATE IMMEDIATELY to Sai. Data loss risk is unacceptable.",
+      "test_generation_hint": "Test: kill mid-operation, network loss mid-transfer, source deleted during copy"
+    },
+    "unknown": {
+      "description": "Unclassified error \u2014 unexpected exception, unknown failure mode",
+      "examples": [
+        "unclassified_error",
+        "unexpected_exception",
+        "unknown_failure",
+        "panic_in_code",
+        "segfault",
+        "hang_unresponsive"
+      ],
+      "severity": "medium",
+      "auto_retry": true,
+      "escalate_after_attempts": 5,
+      "resolution_strategy": "Log full context. Attempt max retries. Classify new error types. Then escalate.",
+      "test_generation_hint": "Add instrumentation to capture full error context. Try to reproduce."
+    }
+  },
+  "resolutionStrategies": {
+    "off_by_one": "Re-examine boundary conditions. Write exact boundary definitions. Test with exact boundary values.",
+    "null_pointer": "Add nil/null checks at every entry point. Specify default values for all optional fields.",
+    "race_condition": "Redesign with proper synchronization. Add mutex/lock. Test with 100 concurrent requests.",
+    "missing_edge_case": "List ALL edge cases in edge-cases.md. Implement handling for each. Test each explicitly.",
+    "api_contract_violation": "Both backend and frontend must re-read api-contract.md. Confirm alignment in API-SYNC gate.",
+    "security_vulnerability": "ESCALATE IMMEDIATELY. Do not retry. Fix before any deployment.",
+    "memory_leak": "Add resource tracking. Verify cleanup in finally/defer. Test long-running with memory monitoring.",
+    "timeout_deadlock": "Test with various timeout values. If architectural, escalate. If implementation, fix.",
+    "state_corruption": "Define full state machine. Add validation at every transition. Test invalid transitions.",
+    "resource_exhaustion": "Add explicit limits. Add circuit breakers. Add fallback behavior. Test at limits.",
+    "infra": "Wait for recovery or switch to backup. DevOps handles infra issues.",
+    "architecture": "Restart architecture loop with more research. If 2nd failure, escalate to Sai.",
+    "coding": "Fix specific bug. Redeploy. Re-test.",
+    "testing": "Fix test suite first, then verify implementation.",
+    "deployment": "Rollback. DevOps fixes. Re-deploy.",
+    "ambiguity": "ESCALATE IMMEDIATELY to Sai with specific questions.",
+    "access": "ESCALATE IMMEDIATELY to Sai. Needs human.",
+    "rollback_plan_missing": "Architect must write complete rollback plan before retry.",
+    "data_loss_risk": "ESCALATE IMMEDIATELY. Add transaction/atomicity before retry.",
+    "unknown": "Classify error. Add instrumentation. Try to reproduce. Escalate if 2nd retry fails."
+  },
+  "severityLevels": {
+    "critical": {
+      "retry": false,
+      "escalate": true,
+      "description": "Must not deploy. Immediate human review required.",
+      "blocks_approval": true
+    },
+    "high": {
+      "retry": false,
+      "escalate": true,
+      "description": "Architecture must be redesigned or specific fix required before retry.",
+      "blocks_approval": true
+    },
+    "medium": {
+      "retry": true,
+      "escalate": false,
+      "description": "Can retry with specific fix guidance.",
+      "blocks_approval": false
+    },
+    "low": {
+      "retry": true,
+      "escalate": false,
+      "description": "Minor issue. Can proceed or fix in next iteration.",
+      "blocks_approval": false
+    }
+  }
+}
