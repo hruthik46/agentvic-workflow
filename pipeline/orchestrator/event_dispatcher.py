@@ -1255,7 +1255,15 @@ class MessageEnvelope:
     
     @property
     def idempotency_key(self) -> str:
-        raw = f"{self.id}:{self.agent_id}:{self.step_id}"
+        # v7.76: Make DISPATCH keys content-deterministic so the SETNX dedup check
+        # in send_to_agent() fires on repeated calls with same gap+agent+subject.
+        # Ephemeral types (NUDGE/HEARTBEAT/INTERRUPT) keep the random self.id so
+        # they always pass through (nudges must re-fire; heartbeats must not be eaten).
+        if self.msg_type in ("NUDGE", "HEARTBEAT", "INTERRUPT"):
+            raw = f"{self.id}:{self.agent_id}:{self.step_id}"
+        else:
+            # step_id = subject[:30] — stable for [ARCH-BLIND-REVIEW] ARCH-IT-070 iteration 2
+            raw = f"{self.msg_type}:{self.agent_id}:{self.gap_id}:{self.step_id}"
         return hashlib.sha256(raw.encode()).hexdigest()
     
     def to_stream_entry(self, dlq_headers: dict = None) -> dict:
@@ -1786,6 +1794,21 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
     if not arch_doc.exists():
         print(f"[dispatcher] WARNING: {arch_doc} not found, skipping review")
         return
+    # v7.76: Dispatch gate - prevent duplicate [ARCH-BLIND-REVIEW] for same gap+iteration.
+    # Acquire Redis SETNX with 15-min TTL before dispatching to architect-blind-tester.
+    # Gate is released in handle_arch_review (on success or v7.50 gate-reject retry).
+    _v776_gate_key = "dispatch:arch-blind-review:" + gap_id + ":" + str(iteration)
+    try:
+        _v776_r = redis_conn()
+        _v776_claimed = _v776_r.set(_v776_gate_key, "1", nx=True, ex=900)  # 15-min TTL
+        if not _v776_claimed:
+            print("[dispatcher] v7.76 DISPATCH-GATE: arch-blind-review already in-flight for "
+                  + gap_id + " iter " + str(iteration) + " - skipping duplicate dispatch")
+            return
+        print("[dispatcher] v7.76 dispatch gate acquired: " + _v776_gate_key)
+    except Exception as _v776_e:
+        print("[dispatcher] v7.76 dispatch gate error (proceeding without gate): " + str(_v776_e))
+
 
     # v7.12: use build_prompt (deterministic minimal prompt with 7-dimension intent)
     if _PROMPT_BUILDER:
@@ -1883,6 +1906,15 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
         "trace_id": tid
     }
     review_file.write_text(json.dumps(review_data, indent=2))
+    # v7.76: Release dispatch gate so stuck/failed sessions can be re-dispatched
+    try:
+        _v776_rr = redis_conn()
+        _v776_rkey = "dispatch:arch-blind-review:" + gap_id + ":" + str(iteration)
+        _v776_rr.delete(_v776_rkey)
+        print("[dispatcher] v7.76 dispatch gate released: " + _v776_rkey)
+    except Exception as _v776_re:
+        print("[dispatcher] v7.76 gate release error: " + str(_v776_re))
+
 
     update_agent_checkpoint("architect", iteration=iteration, rating=rating,
                             docs_ready=True, arch_complete=True, trace_id=tid)
@@ -3669,6 +3701,7 @@ def parse_message(msg_id: str, data: dict):
             if gid_raw.startswith(prefix):
                 gid_raw = gid_raw[len(prefix):]
                 break
+        gid_raw = gid_raw.rstrip(":")  # v7.77: strip trailing colon from [FAN-IN] ARCH-IT-070: body
         gid = gid_raw
         # Also try regex on body in case subject was wholly different
         import re as _re
@@ -3699,13 +3732,14 @@ def parse_message(msg_id: str, data: dict):
             has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{7,40}", (body or "") + " " + (subject or "")))  # v7.60: also check subject + fix stray backspace
             # v7.72: NO-OP scope detection — frontend (or backend) may have no work for backend-only (or frontend-only) gaps
             _is_scope_noop = False
-            _noop_in_msg = "NO-OP" in (body or "").upper() or "NO-OP" in (subject or "").upper()
+            _v777_txt = [(body or "").upper(), (subject or "").upper()]
+            _noop_in_msg = any(kw in t for kw in ("NO-OP","NO_OP","NOOP","BACKEND-ONLY","BACKEND ONLY","FRONTEND-ONLY","FRONTEND ONLY","NO UI") for t in _v777_txt)  # v7.77
             if _noop_in_msg and crg_calls == 0 and not has_real_commit:
                 _iter_n = gap_data.get("iteration", 1) or 1
                 _arch_md = IT_DIR / gid / "phase-2-arch-loop" / f"iteration-{_iter_n}" / "architecture.md"
                 _arch_text = _arch_md.read_text().lower() if _arch_md.exists() else ""
                 if sender in ("frontend", "frontend-worker"):
-                    _fe_markers = {"react", "karios-web", "jsx", "tsx", "usestate", "useeffect", "component", ".tsx", ".jsx"}
+                    _fe_markers = {"react", "karios-web", "jsx", "tsx", "usestate", "useeffect", ".tsx", ".jsx", "reactdom", "import react"}  # v7.78: removed generic "component"
                     if not any(m in _arch_text for m in _fe_markers):
                         _is_scope_noop = True
                         print(f"[dispatcher] v7.72: {sender} NO-OP accepted for {gid} — no React/UI markers in architecture.md")
