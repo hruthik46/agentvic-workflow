@@ -2278,23 +2278,45 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
         # Note: E2E results are already structured JSON, so we don't fail on decision alone
 
     if rating >= 8:  # v6.0 FIX: was 10 (impossibly strict — docs say >=8)
-        transition_phase(gap_id, "4-production", agent="devops", iteration=iteration, trace_id=tid,
-                        _prev_phase="3-coding-testing")
-        update_agent_checkpoint("backend", phase="idle", coding_complete=False)
-        update_agent_checkpoint("frontend", phase="idle", coding_complete=False)
-        update_agent_checkpoint("devops", phase="production")
-        publish_gap_event("gap.completion", gap_id,
-                          {"action": "coding_gate_passed", "rating": rating,
-                           "iterations": iteration, "trace_id": tid})
-        send_to_agent("devops",
-                      f"[PRODUCTION] {gap_id}",
-                      f"E2E testing PASSED ({rating}/10) for {gap_id} after {iteration} iteration(s).\n\n"
-                      f"Deploy to production and notify orchestrator when done: [PROD-DEPLOYED] {gap_id}\n"
-                      f"trace_id: {tid}",
-                      gap_id=gap_id, trace_id=tid)  # v7.3: pass kwargs to avoid None task_id
-        telegram_alert(f"✅ *{gap_id}*: Coding loop PASSED ({rating}/10, {iteration} iter). Deploying to production.")
-        print(f"[dispatcher] Gap {gap_id} PASSED coding loop, deploying to production")
-
+        # v7.79: if prod was already deployed before Phase 4 (v7.79 gate), skip re-deploy
+        try:
+            _v779_re_state = load_state()
+            _v779_re_entry = _v779_re_state.get("active_gaps", {}).get(gap_id, {})
+            _v779_re_prod = _v779_re_entry.get("prod_deployed", False)
+        except Exception:
+            _v779_re_prod = False
+        if _v779_re_prod:
+            # Production already deployed -- tests passed -- mark complete directly
+            print(f"[dispatcher] v7.79: {gap_id} tests PASSED ({rating}/10), prod already deployed -- marking complete")
+            try:
+                _v779_re_state["active_gaps"][gap_id]["phase4_tests_done"] = True
+                save_state(_v779_re_state)
+            except Exception:
+                pass
+            update_gap_phase(gap_id, "completed", completed_at=current_ts(), trace_id=tid)
+            _cmpl_state = load_state()
+            _cmpl_state.setdefault("completed_gaps", []).append(gap_id)
+            save_state(_cmpl_state)
+            _update_active_gap_state(gap_id, phase="completed", state="completed")
+            telegram_alert(f"\u2705 *{gap_id}*: Phase 4 PASSED ({rating}/10). Prod already deployed. COMPLETED! (trace={tid})")
+            print(f"[dispatcher] Gap {gap_id} COMPLETED (prod pre-deployed + tests passed)")
+        else:
+            transition_phase(gap_id, "4-production", agent="devops", iteration=iteration, trace_id=tid,
+                            _prev_phase="3-coding-testing")
+            update_agent_checkpoint("backend", phase="idle", coding_complete=False)
+            update_agent_checkpoint("frontend", phase="idle", coding_complete=False)
+            update_agent_checkpoint("devops", phase="production")
+            publish_gap_event("gap.completion", gap_id,
+                              {"action": "coding_gate_passed", "rating": rating,
+                               "iterations": iteration, "trace_id": tid})
+            send_to_agent("devops",
+                          f"[PRODUCTION] {gap_id}",
+                          f"E2E testing PASSED ({rating}/10) for {gap_id} after {iteration} iteration(s).\n\n"
+                          f"Deploy to production and notify orchestrator when done: [PROD-DEPLOYED] {gap_id}\n"
+                          f"trace_id: {tid}",
+                          gap_id=gap_id, trace_id=tid)
+            telegram_alert(f"\u2705 *{gap_id}*: Coding loop PASSED ({rating}/10, {iteration} iter). Deploying to production.")
+            print(f"[dispatcher] Gap {gap_id} PASSED coding loop, deploying to production")
     elif routing["route"] == "escalate":
         transition_phase(gap_id, "escalated", agent="backend", iteration=iteration,
                          trace_id=tid, _prev_phase="3-coding")
