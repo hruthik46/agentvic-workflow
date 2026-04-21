@@ -671,7 +671,7 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                 token_count.append(len(decoded))
             # If >10K chars accumulated since last tool call AND we've had at least 1 tool call,
             # the agent is producing too much prose between actions → kill
-            if (token_count[1] > 30000 and tool_use_detected.is_set()
+            if (token_count[1] > 50000 and tool_use_detected.is_set()  # v7.42: bumped from 30K — architecture/research phases need more synthesis room between tool calls
                     and tool_use_events[0] > 0 and not kill_event.is_set()):
                 _v727b_hpid = hermes_pid_holder[0] if hermes_pid_holder else None
                 if _v727b_hpid:
