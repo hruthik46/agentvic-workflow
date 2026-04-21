@@ -2600,7 +2600,20 @@ def handle_arch_complete(gap_id: str, iteration: int, body: str, trace_id: str =
     tid = trace_id or new_trace_id(gap_id, "architect", f"arch_complete_iter{iteration}")
     arch_dir = IT_DIR / gap_id / "phase-2-arch-loop" / f"iteration-{iteration}"
     arch_dir.mkdir(parents=True, exist_ok=True)
-    (arch_dir / "architecture.md").write_text(body)
+    # v7.43: do not clobber an existing architecture.md with a small notification body.
+    # Architect normally writes architecture.md via file_write (multi-KB), then sends
+    # [ARCH-COMPLETE] with a short summary body. Old code overwrote the real file with
+    # the summary. Only write the body if the file does not exist OR the body is bigger
+    # than the existing file (so a real arch doc submitted via the message channel
+    # still wins over an empty file_write stub).
+    arch_md = arch_dir / "architecture.md"
+    _v743_body = body or ""
+    _v743_existing_size = arch_md.stat().st_size if arch_md.exists() else 0
+    if (not arch_md.exists()) or len(_v743_body) > _v743_existing_size + 256:
+        arch_md.write_text(_v743_body)
+        print(f"[dispatcher] v7.43 wrote architecture.md ({len(_v743_body)} chars from message body, prior was {_v743_existing_size} bytes)")
+    else:
+        print(f"[dispatcher] v7.43 PRESERVED existing architecture.md ({_v743_existing_size} bytes) — incoming body only {len(_v743_body)} chars")
 
     # ── Output Verification (v4.0) ─────────────────────────────────────────
     if output_verifier is not None:
