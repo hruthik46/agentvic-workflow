@@ -4418,7 +4418,8 @@ def main():
             })
             try:
                 r = redis_conn()
-                real_ids = [mid for mid in processed_ids if isinstance(mid, (str, bytes))]
+                # v7.66: skip fake IDs from file/legacy-inbox fallback — only real stream IDs can be XDELd
+                real_ids = [mid for mid in processed_ids if isinstance(mid, (str, bytes)) and not str(mid).startswith(("file-", "inbox-"))]
                 if real_ids:
                     r.xdel(STREAM_KEY, *real_ids)
                 xdel_span.set_attribute("xdel.count", len(real_ids))
