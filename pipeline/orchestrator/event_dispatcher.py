@@ -3375,7 +3375,7 @@ def parse_message(msg_id: str, data: dict):
                     # Frontend was emitting bare COMPLETE in a loop, each triggering API-SYNC,
                     # bloating backend queue to 7+. v7.53 acknowledges bare COMPLETE without dispatch.
                     import re as _v753_re
-                    _v753_has_commit = bool(_v753_re.search(r"commit_sha=[0-9a-f]{7,40}\b", body or ""))
+                    _v753_has_commit = bool(_v753_re.search(r"commit_sha=[0-9a-f]{7,40}\b", (body or "") + " " + (subject or "")))  # v7.60: also check subject
                     if not _v753_has_commit:
                         print(f"[dispatcher] v7.53 [COMPLETE] phase=3-coding from {sender} for {gap_id} — no commit_sha in body, acknowledged with no API-SYNC dispatch (waiting for [CODING-COMPLETE] with commit)")
                     else:
@@ -3396,7 +3396,7 @@ def parse_message(msg_id: str, data: dict):
                 # signal. Pipeline should wait for backend to actually ship code (commit_sha=)
                 # before testers run.
                 import re as _v754_re
-                if not _v754_re.search(r"commit_sha=[0-9a-f]{7,40}\b", body or ""):
+                if not _v754_re.search(r"commit_sha=[0-9a-f]{7,40}\b", (body or "") + " " + (subject or "")):  # v7.60: also check subject
                     print(f"[dispatcher] v7.54 [COMPLETE] {n_phase} from {sender} for {gap_id} — no commit_sha in body, NOT advancing to Phase 4 testing (waiting for [CODING-COMPLETE])")
                     return
                 # v7.4: API-SYNC complete → Phase 4 (E2E testing by code-blind-tester + tester)
@@ -3541,7 +3541,7 @@ def parse_message(msg_id: str, data: dict):
             # v7.10: if body contains a commit_sha=<40-hex>, the agent shipped real code → just warn
             import re as _re
             # v7.46: accept short (7+) or full (40) SHA. Agents commonly emit commit_sha=a59a2fc from .
-            has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{7,40}", body or ""))
+            has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{7,40}", (body or "") + " " + (subject or "")))  # v7.60: also check subject + fix stray backspace
             if crg_calls == 0 and not has_real_commit:
                 # No proof of work → refuse + retry (orig v7.6 behavior)
                 print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
