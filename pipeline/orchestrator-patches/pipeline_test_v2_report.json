@@ -1,0 +1,82 @@
+{
+  "timestamp": "2026-04-20T21:19:30.712647",
+  "passed": 7,
+  "total": 15,
+  "results": [
+    {
+      "id": "phase1_2.TEST-FLOW-REQ.requirement_to_architect",
+      "passed": false,
+      "details": "events=2"
+    },
+    {
+      "id": "phase2.TEST-FLOW-ARCHPASS.review_pass_to_phase3",
+      "passed": true,
+      "details": "events=['-2 python3[2525051]: [dispatcher] \u2190 architect-blind-tester: [ARCH-REVIEWED] TEST', '-2 python3[2525051]: [dispatcher] \u2192 backend: [FAN-OUT] [CODE-REQUEST] TEST-FLOW-', '-2 python3[2525051]: [dispatcher] \u2192 frontend: [FAN-OUT] [CODE-REQUEST] TEST-FLOW']"
+    },
+    {
+      "id": "phase2.TEST-FLOW-ARCHFAIL.review_fail_to_arch_iterate",
+      "passed": false,
+      "details": "events=[]"
+    },
+    {
+      "id": "phase3.TEST-FLOW-FANIN.fan_in_close",
+      "passed": false,
+      "details": "events=3"
+    },
+    {
+      "id": "phase5.TEST-FLOW-PROD.prod_to_monitor",
+      "passed": true,
+      "details": "events=['-2 python3[2525051]: [dispatcher] \u2190 devops: [PROD-DEPLOYED] TEST-FLOW-PROD (trac']"
+    },
+    {
+      "id": "k_max.TEST-FLOW-KMAX.escalates_at_8_iters",
+      "passed": false,
+      "details": "events=[]"
+    },
+    {
+      "id": "agent.orchestrator",
+      "passed": false,
+      "details": "0 tool calls in 30 min"
+    },
+    {
+      "id": "agent.architect",
+      "passed": true,
+      "details": "\u2713 active+running(00:34), tools=10, queue=2"
+    },
+    {
+      "id": "agent.architect-blind-tester",
+      "passed": false,
+      "details": "0 tool calls in 30 min"
+    },
+    {
+      "id": "agent.backend",
+      "passed": true,
+      "details": "\u2713 active+running(09:17), tools=41, queue=16"
+    },
+    {
+      "id": "agent.frontend",
+      "passed": false,
+      "details": "AuthenticationError x3 in last 30min"
+    },
+    {
+      "id": "agent.devops",
+      "passed": true,
+      "details": "\u2713 active+running(04:45), tools=16, queue=1"
+    },
+    {
+      "id": "agent.tester",
+      "passed": true,
+      "details": "\u2713 active+running(06:54), tools=76, queue=8"
+    },
+    {
+      "id": "agent.code-blind-tester",
+      "passed": true,
+      "details": "\u2713 active+running(10:33), tools=25, queue=13"
+    },
+    {
+      "id": "agent.monitor",
+      "passed": false,
+      "details": "\u2717 INACTIVE, tools=0"
+    }
+  ]
+}
