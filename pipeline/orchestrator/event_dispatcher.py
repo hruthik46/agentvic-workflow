@@ -3451,7 +3451,8 @@ def parse_message(msg_id: str, data: dict):
             crg_calls = session_metadata.get("code_review_graph_calls", 0)
             # v7.10: if body contains a commit_sha=<40-hex>, the agent shipped real code → just warn
             import re as _re
-            has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{40}", body or ""))
+            # v7.46: accept short (7+) or full (40) SHA. Agents commonly emit commit_sha=a59a2fc from .
+            has_real_commit = bool(_re.search(r"commit_sha=[0-9a-f]{7,40}", body or ""))
             if crg_calls == 0 and not has_real_commit:
                 # No proof of work → refuse + retry (orig v7.6 behavior)
                 print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
