@@ -1,0 +1,30 @@
+[
+  {
+    "severity": "LOW",
+    "category": "bare-except-pass",
+    "file_line": "/var/lib/karios/orchestrator/event_dispatcher.py",
+    "description": "36 silent except: pass blocks",
+    "suggested_fix": "Audit each: log error or escalate via telegram"
+  },
+  {
+    "severity": "LOW",
+    "category": "bare-except-pass",
+    "file_line": "/usr/local/bin/agent-worker",
+    "description": "16 silent except: pass blocks",
+    "suggested_fix": "Audit each: log error or escalate via telegram"
+  },
+  {
+    "severity": "LOW",
+    "category": "agent-idle",
+    "file_line": "frontend",
+    "description": "No tool calls in last hour (may be expected if no work)",
+    "suggested_fix": "Verify gap routing reaches this agent"
+  },
+  {
+    "severity": "LOW",
+    "category": "agent-idle",
+    "file_line": "monitor",
+    "description": "No tool calls in last hour (may be expected if no work)",
+    "suggested_fix": "Verify gap routing reaches this agent"
+  }
+]

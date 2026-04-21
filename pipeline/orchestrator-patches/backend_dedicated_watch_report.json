@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-04-20T22:25:32.734529",
+  "watch_duration_sec": 240,
+  "passed": 5,
+  "total": 6,
+  "checks": [
+    {
+      "name": "backend received v7.32 detail",
+      "passed": true,
+      "msg": "v7.32 ISSUE #1 / WHY / SUGGESTED FIX present"
+    },
+    {
+      "name": "backend received 5 listed bugs",
+      "passed": true,
+      "msg": "all 5 bugs (TestAllPlaceholderRoutes, ControlSet002, etc) listed"
+    },
+    {
+      "name": "backend made tool calls",
+      "passed": true,
+      "msg": "48 events captured"
+    },
+    {
+      "name": "no WATCHDOG kills",
+      "passed": true,
+      "msg": "no kills (v7.37 working)"
+    },
+    {
+      "name": "build status improved",
+      "passed": true,
+      "msg": "build stayed GREEN"
+    },
+    {
+      "name": "backend produced new commit",
+      "passed": false,
+      "msg": "no new commits in 4 min"
+    }
+  ],
+  "events_count": 48,
+  "tool_counts": {
+    "API#1": 2,
+    "terminal": 21,
+    "API#2": 2,
+    "API#3": 2,
+    "API#4": 2,
+    "read_file": 2,
+    "API#5": 2,
+    "search_files": 2,
+    "API#6": 2,
+    "API#7": 1,
+    "API#8": 1,
+    "API#9": 1,
+    "API#10": 1,
+    "API#11": 1,
+    "API#12": 1,
+    "API#13": 1,
+    "API#14": 1,
+    "API#15": 1,
+    "fact_store": 1,
+    "API#16": 1
+  },
+  "api_calls_count": 22,
+  "api_total_in": 278943,
+  "api_total_out": 4734,
+  "build_t0": "GREEN",
+  "build_t1": "GREEN",
+  "test_t0": "0P/1F",
+  "test_t1": "0P/1F",
+  "head_t0": "63670b76",
+  "head_t1": "63670b76",
+  "new_commit": false
+}
