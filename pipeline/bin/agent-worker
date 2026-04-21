@@ -596,7 +596,7 @@ The vault at /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/ is the
 
 ## v7.13 — minimal injection (skill kairos-pipeline-operations has the rest)
 
-For code tasks: get_minimal_context(task="...") FIRST (saves 8-16x tokens). Then file_write.
+For code tasks: get_minimal_context(task="...") FIRST (saves 8-16x tokens). Then write_file.
 For git push: cd repo, git pull --rebase, git push. On conflict: karios-merge-resolve.
 NEVER push agentic-workflow files (blacklisted in .gitignore).
 
@@ -803,8 +803,8 @@ The vault at /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/ is the
 
 ## v7.13 — minimal injection (PTY watchdog enforced)
 
-For code: get_minimal_context(task="...") FIRST. Then file_write.
-For tests: cat test-cases.md, run test commands, file_write results.json with evidence.
+For code: get_minimal_context(task="...") FIRST. Then write_file.
+For tests: cat test-cases.md, run test commands, write_file results.json with evidence.
 When done: agent send orchestrator "<subject> <body>".
 Heartbeat: /usr/local/bin/agent-heartbeat {agent_name}.
 
@@ -880,8 +880,8 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
             retry_query = (
                 "STOP writing prose. Resume the task in the TASK section below by calling a tool NOW.\n"
                 "If you were exploring files, your NEXT call MUST be a terminal or read_file tool call.\n"
-                "If you were about to write a file, call file_write NOW.\n"
-                "When the task says 'produce X.md', the only acceptable output is file_write(X.md).\n"
+                "If you were about to write a file, call write_file NOW.\n"
+                "When the task says 'produce X.md', the only acceptable output is write_file(X.md).\n"
                 "Watchdog killed your previous session for excessive prose without tool calls.\n\n"
                 + query
             )

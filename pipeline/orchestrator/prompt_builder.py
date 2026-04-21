@@ -161,7 +161,7 @@ _TEMPLATES = {
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-2-architecture/iteration-{it}/test-cases.md (>=2KB) 7 dimensions, >=3 cases per dim, each = (precondition, action, expected, evidence-cmd)',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-2-architecture/iteration-{it}/edge-cases.md (>=2KB) >=10 cases (concurrent-write, partial-network-failure, OOM) with mitigation',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-2-architecture/iteration-{it}/deployment-plan.md (>=2KB) rollback plan, feature flag, env vars, services to restart',
-            'bash: agent msg send orchestrator [ARCH-COMPLETE] {gid} iteration {it}',
+            'bash: agent send orchestrator [ARCH-COMPLETE] {gid} iteration {it}',
         ],
         'tail_schema': None,
         'rules': [
@@ -183,7 +183,7 @@ _TEMPLATES = {
             'bash: cat /var/lib/karios/iteration-tracker/{gid}/phase-2-architecture/iteration-{it}/edge-cases.md',
             'bash: karios-vault search prior-attempts-{intent_query} --limit 5',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-2-arch-loop/iteration-{it}/review.json with schema below',
-            'bash: agent msg send orchestrator [ARCH-REVIEWED] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-2-arch-loop/iteration-{it}/review.json',
+            'bash: agent send orchestrator [ARCH-REVIEWED] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-2-arch-loop/iteration-{it}/review.json',
         ],
         'tail_schema': _ARCH_REVIEW_SCHEMA,
         'rules': [
@@ -219,7 +219,7 @@ _TEMPLATES = {
             'bash: cd /root/karios-source-code/{repo} && git commit -m {commit_title}',
             'bash: cd /root/karios-source-code/{repo} && git push -u origin backend/{gid}-{date}',
             'bash: cd /root/karios-source-code/{repo} && git rev-parse HEAD',
-            'bash: agent msg send orchestrator [CODING-COMPLETE] {gid} commit_sha=<40-hex> branch=backend/{gid}-{date}',
+            'bash: agent send orchestrator [CODING-COMPLETE] {gid} commit_sha=<40-hex> branch=backend/{gid}-{date}',
         ],
         'tail_schema': _CODING_COMPLETE_SCHEMA,
         'rules': [
@@ -254,7 +254,7 @@ _TEMPLATES = {
             'bash: VPW=$(grep ^VMWARE_SSH_PASSWORD /etc/karios/secrets.env | cut -d= -f2-); sshpass -p $VPW ssh -o StrictHostKeyChecking=no root@192.168.115.232 vim-cmd vmsvc/getallvms | head -10',
             'For each test case: execute, capture stdout/stderr/exit_code into adversarial_test_cases JSON',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/e2e-results.json (schema: ALL 7 dims populated, evidence with REAL output)',
-            'bash: agent msg send orchestrator [E2E-RESULTS] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/e2e-results.json',
+            'bash: agent send orchestrator [E2E-RESULTS] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/e2e-results.json',
         ],
         'tail_schema': _E2E_RESULTS_SCHEMA,
         'rules': [
@@ -280,7 +280,7 @@ _TEMPLATES = {
             'bash: cd /root/karios-source-code/{repo} && go vet ./... 2>&1 | head -20',
             'For each test case: execute the test command, record pass/fail/skip with output snippet',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/test-results.json with rating, recommendation, summary, critical_issues, test_results{{passed,failed,skipped}}, evidence{{build,go_test,go_vet}}, trace_id',
-            'bash: agent msg send orchestrator [TEST-RESULTS] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/test-results.json',
+            'bash: agent send orchestrator [TEST-RESULTS] {gid} iteration {it} < /var/lib/karios/iteration-tracker/{gid}/phase-3-coding/iteration-{it}/test-results.json',
         ],
         'tail_schema': None,
         'rules': [
@@ -301,7 +301,7 @@ _TEMPLATES = {
             'bash: curl -sI http://192.168.118.106:8089/api/v1/healthz',
             'bash: /usr/local/bin/karios-contract-test 2>&1 | tail -20',
             'write_file: /var/lib/karios/iteration-tracker/{gid}/phase-5-deployment/deploy-summary.json (commit_sha, branch, build_status, deploy_status, healthz_status, contract_test_status, timestamp)',
-            'bash: agent msg send orchestrator [PROD-DEPLOYED] {gid}',
+            'bash: agent send orchestrator [PROD-DEPLOYED] {gid}',
         ],
         'tail_schema': None,
         'rules': [
