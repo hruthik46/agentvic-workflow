@@ -1,0 +1,72 @@
+{
+  "timestamp": "2026-04-20T21:14:40.671866",
+  "passed": 11,
+  "total": 13,
+  "results": [
+    {
+      "id": "helper.format_critical_issues",
+      "passed": true,
+      "details": "5/5 markers found"
+    },
+    {
+      "id": "helper.classify_error_cases",
+      "passed": true,
+      "details": "4 cases tested"
+    },
+    {
+      "id": "state.persist_round_trip",
+      "passed": true,
+      "details": "iter=42 written + read back"
+    },
+    {
+      "id": "telegram.smoke_test",
+      "passed": true,
+      "details": "telegram_alert call succeeded (check Telegram channel)"
+    },
+    {
+      "id": "langfuse.trace_ingestion",
+      "passed": true,
+      "details": "trace created + flushed"
+    },
+    {
+      "id": "disk-fallback.TEST-FLOW-DISKFB.fired",
+      "passed": false,
+      "details": "events: []"
+    },
+    {
+      "id": "gap-recovery.TEST-FLOW-NOGAP.fallback_fired",
+      "passed": true,
+      "details": "events: ['-2 python3[2525051]: [dispatcher] v7.21.1 [E2E-RESULTS] no gap in subject \u2014 recovered gap_id=GAP-1776734055 (from trace_']"
+    },
+    {
+      "id": "normalizer.TEST-FLOW-NORMALIZE.complete_to_e2e_results",
+      "passed": false,
+      "details": "events: []"
+    },
+    {
+      "id": "phase4-fail.TEST-FLOW-PH4FAIL.code_revise_dispatched",
+      "passed": true,
+      "details": "events: 1"
+    },
+    {
+      "id": "phase4-fail.TEST-FLOW-PH4FAIL.v732_detail_in_backend",
+      "passed": true,
+      "details": "v7.32 markers found: ['ISSUE #1', 'WHY (root cause)', 'REPRODUCE', 'SUGGESTED FIX', 'ACCEPTANCE', 'missing semicolon']"
+    },
+    {
+      "id": "phase4-fail.TEST-FLOW-PH4FAIL.testers_re_dispatched",
+      "passed": true,
+      "details": "tester=6 cbt=9"
+    },
+    {
+      "id": "phase4-pass.TEST-FLOW-PH4PASS.production_dispatched",
+      "passed": true,
+      "details": "events: ['-2 python3[2525051]: [dispatcher] \u2192 devops: [PRODUCTION] TEST-FLOW-PH4PASS (trac', '-2 python3[2525051]: [dispatcher] Gap TEST-FLOW-PH4PASS PASSED coding loop, depl']"
+    },
+    {
+      "id": "infra-route.TEST-FLOW-INFRA.routed_to_devops",
+      "passed": true,
+      "details": "events: ['-2 python3[2525051]: [dispatcher] \u2192 devops: [PRODUCTION] TEST-FLOW-PH4PASS (trac', '-2 python3[2525051]: [dispatcher] v7.23.2 INFRA-FIX routing for TEST-FLOW-INFRA ', '-2 python3[2525051]: [dispatcher] \u2192 devops: [INFRA-FIX] TEST-FLOW-INFRA iteratio']"
+    }
+  ]
+}
