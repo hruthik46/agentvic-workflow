@@ -1800,7 +1800,7 @@ def submit_arch_for_review(gap_id: str, iteration: int, trace_id: str = None):
         f'    {{"gap_id":"{gap_id}","iteration":{iteration},"rating":N,"critical_issues":[...],"dimensions":{{"correctness":N,"completeness":N,"feasibility":N,"security":N,"testability":N,"resilience":N}},"adversarial_test_cases":{{...}},"recommendation":"APPROVE|REQUEST_CHANGES|REJECT","summary":"...","trace_id":"{tid}"}}\n'
         f"STEP 5 (bash): emit [ARCH-REVIEWED] with the review JSON in body:\n"
         f"    /usr/local/bin/agent-stream-progress '{tid}' '[ARCH-REVIEWED] {gap_id} iteration {iteration}'\n"
-        f"    then send signal: agent msg send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
+        f"    then send signal: agent send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
         f"    (dispatcher reads review.json from disk automatically — do NOT pipe JSON into the command)\n\n"
         f"DO NOT WRITE PROSE. Each output MUST be a tool call. Watchdog kills prose-only sessions at 6000 chars.\n"
         f"Your role doc is at ~/.hermes/profiles/architect-blind-tester/SOUL.md — consult it only if needed via read_file."
@@ -1850,7 +1850,7 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
                           f"  curl -sk https://192.168.118.202/client/api 2>&1 | head -5\n"
                           f"STEP 3: Write review.json to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/review.json\n"
                           f"  evidence.real_env_probes MUST be a JSON array: [{{\"command\": \"...\", \"stdout_excerpt\": \"...actual output\"}}]\n"
-                          f"STEP 4: EXACT send command: agent msg send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
+                          f"STEP 4: EXACT send command: agent send orchestrator \"[ARCH-REVIEWED] {gap_id} iteration {iteration}\"\n"
                           f"  (do NOT pipe JSON — dispatcher reads review.json from disk)\n\n"
                           f"=== PREVIOUS CRITICAL ISSUES (score these) ===\n"
                           f"{_gate_issues}",
@@ -1968,7 +1968,7 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                       f"One final iteration to address these quickly, then proceed to coding.\n\n"
                       f"OUTPUT: Write ALL 5 docs to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration + 1}/\n"
                       f"  - architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md\n"
-                      f"Then: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {iteration + 1}'",
+                      f"Then: agent send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {iteration + 1}'",
                       gap_id=gap_id, trace_id=tid)
         print(f"[dispatcher] Gap {gap_id} FAST-TRACK: rating {rating} >= {ROUTING_FAST_TRACK}")
 
@@ -2011,8 +2011,8 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                           f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
                           f"STEP 2: For each CRITICAL issue above, edit the doc at LOCATION with the SUGGESTED FIX\n"
                           f"STEP 3: Write ALL 5 updated docs to iteration-{next_iter}/ (architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md)\n"
-                          f"STEP 4: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
-                          f"  (EXACT command — do NOT use 'agent send', do NOT pipe JSON)\n",
+                          f"STEP 4: agent send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
+                          f"  (EXACT command — do NOT pipe JSON; NOT 'agent msg send' which fails)\n",
                           gap_id=gap_id, trace_id=tid)
             print(f"[dispatcher] Gap {gap_id} self-correcting: {strategy}")
 
@@ -2032,8 +2032,8 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                       f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
                       f"STEP 2: For each CRITICAL issue above, locate LOCATION in the doc and apply SUGGESTED FIX\n"
                       f"STEP 3: Write ALL 5 updated docs to iteration-{next_iter}/ (architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md)\n"
-                      f"STEP 4: agent msg send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
-                      f"  (EXACT command — do NOT use 'agent send', do NOT pipe JSON)",
+                      f"STEP 4: agent send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {next_iter}'\n"
+                      f"  (EXACT command — do NOT pipe JSON; NOT 'agent msg send' which fails)",
                       gap_id=gap_id, trace_id=tid)
         print(f"[dispatcher] Gap {gap_id} arch loop iteration {next_iter} (prev rating {rating}/10)")
 
