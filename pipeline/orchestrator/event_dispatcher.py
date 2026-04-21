@@ -2000,12 +2000,22 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                              self_diagnosis=strategy)
             update_agent_checkpoint("architect", phase="phase-2-arch", iteration=next_iter,
                                     rating=rating, self_diagnosis=strategy, trace_id=tid)
-            _swe_issues = format_critical_issues_for_revise(critical_issues, kind="arch")
+            # v7.71: if critical_issues empty, extract HIGH issues from dimensions for architect
+            _v771_issues = list(critical_issues) if critical_issues else []
+            if not _v771_issues and dimensions:
+                for _dim_name, _dim_val in (dimensions or {}).items():
+                    if isinstance(_dim_val, dict):
+                        for _dim_issue in (_dim_val.get("issues") or []):
+                            _v771_issues.append({"severity": "HIGH", "category": _dim_name,
+                                                "description": str(_dim_issue)[:300], "dimension": _dim_name})
+                if _v771_issues:
+                    print(f"[dispatcher] v7.71: extracted {len(_v771_issues)} HIGH issues from dimensions for {gap_id} (critical_issues was empty)")
+            _swe_issues = format_critical_issues_for_revise(_v771_issues, kind="arch")
             send_to_agent("architect",
                           f"[ARCH-ITERATE] {gap_id} — self-correct iteration {next_iter}",
                           f"⚠️ {strategy}\n\n"
                           f"ITERATION {next_iter}/{11} — Previous rating: {rating}/10\n\n"
-                          f"=== CRITICAL ISSUES (fix ALL before submitting) ===\n"
+                          f"=== ISSUES TO ADDRESS (fix ALL before submitting) ===\n"
                           f"{_swe_issues}\n\n"
                           f"=== NUMBERED STEPS ===\n"
                           f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
@@ -2022,11 +2032,21 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                          last_rating=rating, last_issues=critical_issues)
         update_agent_checkpoint("architect", phase="phase-2-arch", iteration=next_iter,
                                 rating=rating, trace_id=tid)
-        _swe_issues_else = format_critical_issues_for_revise(critical_issues, kind="arch")
+        # v7.71: if critical_issues empty, extract HIGH issues from dimensions
+        _v771_issues_else = list(critical_issues) if critical_issues else []
+        if not _v771_issues_else and dimensions:
+            for _dim_name_e, _dim_val_e in (dimensions or {}).items():
+                if isinstance(_dim_val_e, dict):
+                    for _dim_issue_e in (_dim_val_e.get("issues") or []):
+                        _v771_issues_else.append({"severity": "HIGH", "category": _dim_name_e,
+                                                  "description": str(_dim_issue_e)[:300], "dimension": _dim_name_e})
+            if _v771_issues_else:
+                print(f"[dispatcher] v7.71: extracted {len(_v771_issues_else)} HIGH issues from dimensions for {gap_id}")
+        _swe_issues_else = format_critical_issues_for_revise(_v771_issues_else, kind="arch")
         send_to_agent("architect",
                       f"[ARCH-ITERATE] {gap_id} — iteration {next_iter}",
                       f"ITERATION {next_iter}/10 — Previous rating: {rating}/10\n\n"
-                      f"=== CRITICAL ISSUES (SWE-bench format — fix ALL) ===\n"
+                      f"=== ISSUES TO ADDRESS (fix ALL before submitting) ===\n"
                       f"{_swe_issues_else}\n\n"
                       f"=== NUMBERED STEPS ===\n"
                       f"STEP 1: Copy /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration}/ → iteration-{next_iter}/\n"
