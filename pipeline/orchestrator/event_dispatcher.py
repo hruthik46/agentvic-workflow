@@ -1141,8 +1141,11 @@ def load_gap(gap_id: str) -> dict:
     arch_review_dir = gap_dir / "phase-2-arch-loop"
     if arch_review_dir.exists():
         for f in sorted(arch_review_dir.glob("iteration-*/review.json")):
-            reviews.append({"iteration": int(f.parent.name.split("-")[1]),
-                           "review": json.loads(f.read_text())})
+            try:
+                reviews.append({"iteration": int(f.parent.name.split("-")[1]),
+                               "review": json.loads(f.read_text())})
+            except (json.JSONDecodeError, ValueError) as _je:
+                print(f"[dispatcher] WARN load_gap: skipping corrupt review.json {f}: {_je}")
     data["arch_reviews"] = reviews
     return data
 
@@ -1662,7 +1665,7 @@ def send_to_agent(agent: str, subject: str, body: str,
     
     env = MessageEnvelope(
         agent_id=agent,
-        step_id=subject[:30],  # Use subject as step_id
+        step_id=subject[:60],  # Use subject as step_id (v7.83+ — 60 chars to include iteration number)
         gap_id=gap_id,
         trace_id=tid,
         msg_type=msg_type,
@@ -3139,7 +3142,7 @@ def parse_message(msg_id: str, data: dict):
     # v7.6 Item A: Pydantic schema validation (log-only first pass)
     if _SCHEMA_VALIDATION and subject and body:
         try:
-            _validated = validate_body(subject, body, log_only=True)
+            _validated = validate_body(subject, body, log_only=False)
             if _validated is not None:
                 print(f"[dispatcher] schema OK: {type(_validated).__name__}")
         except SchemaViolation as _sv:
@@ -3801,6 +3804,16 @@ def parse_message(msg_id: str, data: dict):
                     if not any(m in _arch_text for m in _be_markers):
                         _is_scope_noop = True
                         print(f"[dispatcher] v7.72: {sender} NO-OP accepted for {gid} — no backend markers in architecture.md")
+            # v7.85: persist noop_agents so API-SYNC gate auto-confirms them later
+            if _is_scope_noop:
+                _noop_canonical_85 = "frontend" if sender in ("frontend", "frontend-worker") else "backend"
+                _g85 = load_gap(gid) or {}
+                _noop_list_85 = _g85.get("noop_agents", [])
+                if _noop_canonical_85 not in _noop_list_85:
+                    _noop_list_85.append(_noop_canonical_85)
+                    _g85["noop_agents"] = _noop_list_85
+                    save_gap(gid, _g85)
+                print(f"[dispatcher] v7.85: persisted {_noop_canonical_85} as noop_agent for {gid}")
             if crg_calls == 0 and not has_real_commit and not _is_scope_noop:
                 # No proof of work → refuse + retry (orig v7.6 behavior)
                 print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
@@ -3848,10 +3861,21 @@ def parse_message(msg_id: str, data: dict):
                 f"Do NOT implement more code — only confirm alignment.\n"
                 f"trace_id: {tid}"
             )
-            send_to_agent("backend", f"[API-SYNC] {gid} — confirm API alignment before deploy",
-                          sync_body, gap_id=gid, trace_id=tid, priority="high")
-            send_to_agent("frontend", f"[API-SYNC] {gid} — confirm API alignment before deploy",
-                          sync_body, gap_id=gid, trace_id=tid, priority="high")
+            # v7.85: pre-confirm noop agents so API-SYNC gate does not deadlock
+            gap_data = load_gap(gid)  # reload after fan_in save
+            _noop_85 = set(gap_data.get("noop_agents", []))
+            if _noop_85:
+                _ac85 = set(gap_data.get("api_sync_confirmed", []))
+                _ac85 |= _noop_85
+                gap_data["api_sync_confirmed"] = list(_ac85)
+                save_gap(gid, gap_data)
+                print(f"[dispatcher] v7.85: pre-confirmed noop_agents {_noop_85} for {gid} in api_sync_confirmed")
+            if "backend" not in _noop_85:
+                send_to_agent("backend", f"[API-SYNC] {gid} — confirm API alignment before deploy",
+                              sync_body, gap_id=gid, trace_id=tid, priority="high")
+            if "frontend" not in _noop_85:
+                send_to_agent("frontend", f"[API-SYNC] {gid} — confirm API alignment before deploy",
+                              sync_body, gap_id=gid, trace_id=tid, priority="high")
             publish_gap_event("gap.iteration", gid,
                               {"action": "fan_in_api_sync_triggered", "gap_id": gid, "trace_id": tid})
         return
