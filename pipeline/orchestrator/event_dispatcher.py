@@ -294,7 +294,7 @@ def _file_inbox_fallback() -> list:
                     "from": data.get("from", "unknown"),
                     "subject": subject,
                     "body": body,
-                    "gap_id": None,
+                    "gap_id": data.get("gap_id") or None,  # v7.81b: honor gap_id from v7.65 re-inject packets
                     "trace_id": None,
                     "timestamp": data.get("created_at", current_ts()),
                     "_packet_id": data.get("id"),
@@ -870,7 +870,7 @@ def telegram_alert(message: str):
 
 # ── Fan-Out / Fan-In Pattern ─────────────────────────────────────────────────
 FAN_STATE_FILE = ORCHESTRATOR_DIR / "fan-state.json"
-_GAP_ID_RE = re.compile(r'^[A-Z]+-[A-Z]+-\d+$')  # v7.74: gap_id format guard
+_GAP_ID_RE = re.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9]')  # v7.81b: matches ARCH-IT-070, TEST-FLOW-DISKFB, REQ-VMWARE-AUDIT-001
 
 def notify_phase_transition(gap_id: str, from_agent: str, to_agent: str,
                               event: str, rating=None, score_max=10, summary: str = ""):
@@ -1634,10 +1634,10 @@ def send_to_agent(agent: str, subject: str, body: str,
                         ref_gaps = re.findall(r'([A-Z]+-[IT]+-\d+)', can_start)
                         for ref in ref_gaps:
                             ref_entry = active.get(ref, {})
-                            # Check if arch gate passed (score >= 10 or equivalent)
+                            # Check if arch gate passed (score >= 8 — consistent with compute_routing threshold)
                             arch_score = ref_entry.get('architecture_score', 0)
-                            if arch_score < 10:
-                                print(f"[dispatcher] Wave BLOCKED: {gap_id} waits for {ref} arch gate (score={arch_score}/10, need >=10)")
+                            if arch_score < 8:
+                                print(f"[dispatcher] Wave BLOCKED: {gap_id} waits for {ref} arch gate (score={arch_score}/10, need >=8)")
                                 return False
             except Exception as e:
                 print(f"[dispatcher] Wave rules check error: {e}")
@@ -1887,6 +1887,14 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
                           gap_id=gap_id, trace_id=trace_id, priority="high")
         except Exception as _e:
             print(f"[dispatcher] v7.50 retry dispatch failed: {_e}")
+        # v7.81: Release gate on v7.50 reject so retry dispatch can re-acquire it
+        try:
+            _v781_rr = redis_conn()
+            _v781_rkey = "dispatch:arch-blind-review:" + gap_id + ":" + str(iteration)
+            _v781_rr.delete(_v781_rkey)
+            print("[dispatcher] v7.81 gate released on v7.50 reject: " + _v781_rkey)
+        except Exception as _v781_e:
+            print("[dispatcher] v7.81 gate release error: " + str(_v781_e))
         return
     tid = trace_id or new_trace_id(gap_id, "architect-blind-tester", f"arch_review_result_{iteration}")
     dimensions = dimensions or {}
@@ -2108,8 +2116,11 @@ def submit_code_for_test(gap_id: str, iteration: int, trace_id: str = None):
 
 Gap ID: {gap_id}
 Iteration: {iteration}/10
-What was built: See architecture docs at {IT_DIR / gap_id / 'phase-2-arch-loop'}
+arch-docs: {IT_DIR / gap_id / 'phase-2-arch-loop' / f'iteration-{iteration}'}
 trace_id: {tid}
+
+SCOPE: Test ONLY endpoints introduced or modified by THIS gap (see arch-docs for in-scope endpoints).
+Pre-existing missing endpoints are out-of-scope — log in out_of_scope_observations, not critical_issues.
 
 Your role: Code-Blind-Tester — you test the DEPLOYED SYSTEM only.
 You do NOT know what was built or how. You only interact with the running system.
@@ -2215,7 +2226,8 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
         "recommendation": recommendation,
         "tester": "code-blind-tester",
         "timestamp": current_ts(),
-        "trace_id": tid
+        "trace_id": tid,
+        "evidence": evidence or {},  # v7.81b: preserve evidence so v7.50 gate passes on disk fallback
     }
     (test_dir / "e2e-results.json").write_text(json.dumps(results_data, indent=2))
 
@@ -3011,13 +3023,30 @@ def progress_probe_check():
                     telegram_alert(orphan_msg)
                     print(f"[probe] {orphan_msg}")
                     try:
-                        # Re-dispatch the CODE-REQUEST to the owner
-                        send_to_agent(owner, f"[FAN-OUT] [CODE-REQUEST] {gap_id} {gap_id}",
-                                      f"gap_id: {gap_id}\niteration: 1\ntrace_id: trace_orphan_recover_{int(_t.time())}\n\n"
-                                      f"Orphan recovery: this gap's phase=3-coding but you never received a dispatch. "
-                                      f"Read /var/lib/karios/iteration-tracker/{gap_id}/ for context. "
-                                      f"Use get_minimal_context first. Implement + push to gitea + emit [CODING-COMPLETE].",
-                                      gap_id=gap_id, trace_id=f"trace_orphan_{gap_id}", priority="high")
+                        # Re-dispatch to owner using actual iteration from gap metadata
+                        _actual_iter = ge.get("iteration") or gdata.get("iteration", 1)
+                        _phase_norm = phase.lstrip("phase-")
+                        _trace = f"trace_orphan_recover_{int(_t.time())}"
+                        _base_body = (
+                            f"gap_id: {gap_id}\niteration: {_actual_iter}\ntrace_id: {_trace}\n\n"
+                            f"Orphan recovery: gap is in phase={phase} but {owner} has no active session. "
+                            f"Read /var/lib/karios/iteration-tracker/{gap_id}/ for context. "
+                            f"Use get_minimal_context first."
+                        )
+                        if _phase_norm in ("3-coding", "3-coding-sync"):
+                            send_to_agent(owner, f"[FAN-OUT] [CODE-REQUEST] {gap_id} {gap_id}",
+                                          _base_body + " Implement + push to gitea + emit [CODING-COMPLETE].",
+                                          gap_id=gap_id, trace_id=f"trace_orphan_{gap_id}", priority="high")
+                        elif _phase_norm in ("1-research", "2-arch-loop", "2-architecture"):
+                            send_to_agent(owner, f"[ARCHITECT] {gap_id}",
+                                          _base_body + " Continue arch design and emit [ARCH-COMPLETE].",
+                                          gap_id=gap_id, trace_id=f"trace_orphan_{gap_id}", priority="high")
+                        elif _phase_norm in ("4-testing",):
+                            send_to_agent(owner, f"[TEST-RUN] {gap_id}",
+                                          _base_body + " Run tests and emit [E2E-RESULTS] or [TEST-RESULTS].",
+                                          gap_id=gap_id, trace_id=f"trace_orphan_{gap_id}", priority="high")
+                        else:
+                            print(f"[probe] orphan phase={phase} has no re-dispatch handler; Telegram alert only")
                         ps["stale_count"] = 0
                         _save_probe_state(_PROGRESS_PROBE_STATE)
                         continue
@@ -3414,12 +3443,15 @@ def parse_message(msg_id: str, data: dict):
     if subject.startswith("[COMPLETE]") or subject.startswith("[COMPLETE]"):
         # v7.5.2: re imported at module top
         # Extract gap_id from body (gap_id: ARCH-IT-XXX)
-        gap_id_match = re.search(r"gap_id:\s*(\S+)", body)
-        phase_match = re.search(r"phase:\s*(\S+)", body)
-        coding_complete_match = re.search(r"coding_complete:\s*(True|False)", body)
-        iteration_match = re.search(r"iteration:\s*(\d+)", body)
-        gap_id = gap_id_match.group(1) if gap_id_match else None
-        phase = phase_match.group(1) if phase_match else None
+        gap_id_match = re.search(r"gap_id[=:\s]+([A-Z][A-Z0-9-]+)", body or "")
+        if not gap_id_match:
+            gap_id_match = re.search(r"\bgap[=:]([A-Z][A-Z0-9-]+)", (body or "") + " " + (subject or ""))
+        phase_match = re.search(r"phase[=:\s]+([\w.-]+)", (body or "") + " " + (subject or ""))
+        coding_complete_match = re.search(r"coding_complete:\s*(True|False)", body or "")
+        iteration_match = re.search(r"iteration:\s*(\d+)", body or "")
+        _extracted_gap_id = gap_id_match.group(1).rstrip(";,. ") if gap_id_match else None
+        gap_id = _extracted_gap_id or gap_id  # v7.81b: fall back to parse_message gap_id
+        phase = phase_match.group(1).rstrip(";,. ") if phase_match else None
         iteration = int(iteration_match.group(1)) if iteration_match else 1
         coding_complete = coding_complete_match.group(1) == "True" if coding_complete_match else False
 
@@ -3666,8 +3698,7 @@ def parse_message(msg_id: str, data: dict):
                             "from": sender,
                             "to": "orchestrator",
                             "id": f"v718-norm-{_u.uuid4().hex[:8]}",
-                            "subject": _normalized["subject"],
-                            "body": _normalized["body"],
+                            "message": _normalized["subject"] + "\n" + _normalized["body"],
                             "gap_id": gap_id,
                             "trace_id": trace_id or "",
                             "priority": "high",
@@ -4091,7 +4122,24 @@ def parse_message(msg_id: str, data: dict):
             try:
                 from pathlib import Path as _v720_P
                 _v720_root = _v720_P(f"/var/lib/karios/iteration-tracker/{gid}")
-                _v720_files = list(_v720_root.rglob("e2e-results.json"))
+                # v7.81b: for [E2E-RESULTS], prefer e2e-results.json (has evidence.live_api_probes)
+                # test-results.json (from tester) never has live_api_probes, causing v7.50 gate-reject
+                if subject.startswith("[E2E-RESULTS]") or subject.startswith("[BLIND-E2E"):
+                    _v720_files = sorted(
+                        list(_v720_root.rglob("e2e-results.json")),
+                        key=lambda p: p.stat().st_mtime, reverse=True
+                    ) or sorted(
+                        list(_v720_root.rglob("test-results.json")),
+                        key=lambda p: p.stat().st_mtime, reverse=True
+                    )
+                else:
+                    # v7.79: also check test-results.json (written by tester, not code-blind-tester)
+                    _v720_files = sorted(
+                        list(_v720_root.rglob("e2e-results.json")) +
+                        list(_v720_root.rglob("test-results.json")),
+                        key=lambda p: p.stat().st_mtime, reverse=True
+                    )
+                _v720_files = list(_v720_files)  # re-assign for compat
                 if _v720_files:
                     _v720_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                     _v720_latest = _v720_files[0]
@@ -4554,8 +4602,11 @@ def main():
             except Exception as e:
                 span.set_attribute("dispatch.success", False)
                 tracer.end_span(span, e)
+                import traceback as _tb
                 print(f"[dispatcher] ERROR processing message {msg_id}: {e}")
-                raise
+                print("[dispatcher] TRACEBACK:", _tb.format_exc())
+                processed_ids.append(msg_id)  # v7.81: ack bad message so it is not re-read
+                continue  # v7.81: log and skip rather than crashing the dispatcher
             tracer.end_span(span)
 
         # v7.8: progress probe — detect stuck active phases every cycle

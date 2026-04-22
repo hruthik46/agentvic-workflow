@@ -864,6 +864,12 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
     # If killed by watchdog, retry once with forced tool-use prompt
     if exit_code == -_signal.SIGTERM.value or kill_event.is_set():
         print(f"[{AGENT}] WATCHDOG triggered — retrying with forced tool-use prompt")
+        # v7.82: operator skip-file mechanism — prevents infinite blocks
+        _wskip = Path(f"/var/lib/karios/coordination/watchdog-skip/{AGENT}")
+        if _wskip.exists():
+            _wskip.unlink(missing_ok=True)
+            print(f"[{AGENT}] WATCHDOG-SKIP: abort retry, marking task done")
+            return full_output + "\n[WATCHDOG-SKIPPED]"
         # v7.38: context-aware retry — only inject SUGGESTED-FIX language when the original
         # query actually contains a CRITICAL ISSUES section (i.e., it's a CODE-REVISE/CODE-REQUEST).
         # Otherwise (RESEARCH/ARCH-DESIGN/E2E-REVIEW/TEST-RUN), use a task-generic retry that
@@ -891,7 +897,7 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
              "--query", retry_query,
              "--toolsets", "terminal,file,web",
              "-v"],
-            capture_output=True, text=True, timeout=1800, cwd="/root"
+            capture_output=True, text=True, timeout=300, cwd="/root"
         ).stdout + "\n[WATCHDOG-RETRY]"
         # v7.21-B: escalate if retry STILL produced no tool_use (prose-mode persistent)
         if "tool_use" not in retry_output and len(retry_output) > 1500:
