@@ -3677,8 +3677,12 @@ def parse_message(msg_id: str, data: dict):
             else:
                 # v7.18: Subject normalizer — if a tester emits [COMPLETE] without proper subject,
                 # rewrite as [E2E-RESULTS] / [TEST-RESULTS] using on-disk JSON or honest REJECT
+                # v7.86: skip normalization for terminal gaps (escalated/completed) to avoid zombie loops
+                _v786_gap_state = (load_gap(gap_id) or {}).get('state', '')
                 _normalized = None
-                if _v718_normalize is not None:
+                if _v786_gap_state in ('completed', 'escalated', 'rejected', 'cancelled'):
+                    print(f'[dispatcher] v7.86 SKIP v7.18 normalization for {gap_id}: state={_v786_gap_state} (terminal)')
+                elif _v718_normalize is not None:
                     try:
                         _normalized = _v718_normalize(
                             sender=sender,
