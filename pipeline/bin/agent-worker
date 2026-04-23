@@ -1436,7 +1436,7 @@ def main():
     # Orchestrator's _file_inbox_fallback() and _inbox_fallback() will pick this up.
     def _notify_orchestrator_completion(result: dict):
         gap_id = result.get("gap_id", "none")
-        trace_id = result.get("trace_id", "")
+        trace_id = (result.get("trace_id") or "").strip() or f"completion-{gap_id}-{int(time.time())}"  # v7.100-A: ensure trace_id is never empty/None before xadd
         coding_complete = result.get("coding_complete", False)
         agent = result.get("agent", AGENT)
         result_preview = result.get("result_preview", "(no output)")[:200]
