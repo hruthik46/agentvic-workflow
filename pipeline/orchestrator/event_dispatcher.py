@@ -1964,16 +1964,19 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
     # v7.89c: raised from 10 to 12 to match arch max_iter=11 (was prematurely hard-escalating)
     _arch_k_max = _pipeline_cfg().get("arch_k_max", 15)
     if iteration >= _arch_k_max:
-        try:
-            _v786_state_path = Path("/var/lib/karios/orchestrator/state.json")
-            _v786_state = json.loads(_v786_state_path.read_text())
-            _v786_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
-            _v786_state["active_gaps"][gap_id]["iteration"] = iteration
-            _v786_state["active_gaps"][gap_id]["phase"] = "escalated"
-            _v786_state_path.write_text(json.dumps(_v786_state, indent=2))
-            print(f"[dispatcher] v7.86 ARCH HARD ESCALATE {gap_id} iter={iteration}/{_arch_k_max} — state frozen")
-        except Exception as _v786_e:
-            print(f"[dispatcher] v7.86 state freeze failed: {_v786_e}")
+        if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-A: never persist invalid gap_ids
+            print(f"[dispatcher] v7.104-A SKIP v7.86 escalate invalid gap_id={gap_id!r}")
+        else:
+            try:
+                _v786_state_path = Path("/var/lib/karios/orchestrator/state.json")
+                _v786_state = json.loads(_v786_state_path.read_text())
+                _v786_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
+                _v786_state["active_gaps"][gap_id]["iteration"] = iteration
+                _v786_state["active_gaps"][gap_id]["phase"] = "escalated"
+                _v786_state_path.write_text(json.dumps(_v786_state, indent=2))
+                print(f"[dispatcher] v7.86 ARCH HARD ESCALATE {gap_id} iter={iteration}/{_arch_k_max} — state frozen")
+            except Exception as _v786_e:
+                print(f"[dispatcher] v7.86 state freeze failed: {_v786_e}")
         try:
             telegram_alert(f"🚨 *{gap_id}*: ARCH HARD ESCALATE — stuck at iteration {iteration}/{_arch_k_max}. Last rating: {rating}/10.")
         except Exception:
@@ -2614,8 +2617,9 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
             # Production already deployed -- tests passed -- mark complete directly
             print(f"[dispatcher] v7.79: {gap_id} tests PASSED ({rating}/10), prod already deployed -- marking complete")
             try:
-                _v779_re_state["active_gaps"][gap_id]["phase4_tests_done"] = True
-                save_state(_v779_re_state)
+                if _GAP_ID_RE.match(gap_id or ""):  # v7.104-B
+                    _v779_re_state["active_gaps"][gap_id]["phase4_tests_done"] = True
+                    save_state(_v779_re_state)
             except Exception:
                 pass
             update_gap_phase(gap_id, "completed", completed_at=current_ts(), trace_id=tid)
@@ -2674,16 +2678,19 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
 
         # v7.27-D: HARD K_MAX ESCALATION at iteration > 8
         if iteration >= 8:
-            try:
-                _v727d_state_path = Path("/var/lib/karios/orchestrator/state.json")
-                _v727d_state = json.loads(_v727d_state_path.read_text())
-                _v727d_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
-                _v727d_state["active_gaps"][gap_id]["iteration"] = iteration
-                _v727d_state["active_gaps"][gap_id]["phase"] = "escalated"
-                _v727d_state_path.write_text(json.dumps(_v727d_state, indent=2))
-                print(f"[dispatcher] v7.27-D HARD ESCALATE {gap_id} iter={iteration}/8 — state frozen")
-            except Exception as _v727d_e:
-                print(f"[dispatcher] v7.27-D state freeze failed: {_v727d_e}")
+            if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-C: never persist invalid gap_ids
+                print(f"[dispatcher] v7.104-C SKIP v7.27-D escalate invalid gap_id={gap_id!r}")
+            else:
+                try:
+                    _v727d_state_path = Path("/var/lib/karios/orchestrator/state.json")
+                    _v727d_state = json.loads(_v727d_state_path.read_text())
+                    _v727d_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
+                    _v727d_state["active_gaps"][gap_id]["iteration"] = iteration
+                    _v727d_state["active_gaps"][gap_id]["phase"] = "escalated"
+                    _v727d_state_path.write_text(json.dumps(_v727d_state, indent=2))
+                    print(f"[dispatcher] v7.27-D HARD ESCALATE {gap_id} iter={iteration}/8 — state frozen")
+                except Exception as _v727d_e:
+                    print(f"[dispatcher] v7.27-D state freeze failed: {_v727d_e}")
             try:
                 telegram_alert(f"🚨 *{gap_id}*: HARD ESCALATE — stuck after {iteration} iterations. Critical issues persist:\n" +
                               ("\n".join(f"- {str(i)[:120]}" for i in critical_issues[:5])))
@@ -3357,6 +3364,9 @@ def _update_active_gap_state(gap_id: str, phase: str = None, state: str = None, 
     (i.e. a human resolved the gap), DEL v792:rejects:{gap_id} and v792:escalated:{gap_id}
     so future empty-completion guards are not pre-poisoned by stale counters.
     """
+    if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-D: central guard
+        print(f"[dispatcher] v7.104-D SKIP _update_active_gap_state for invalid gap_id={gap_id!r}")
+        return
     try:
         st = load_state() or {}
         ag = st.setdefault('active_gaps', {})
