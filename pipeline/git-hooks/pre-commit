@@ -1,0 +1,26 @@
+#!/bin/bash
+# R-6 pre-commit hook — reject git merge conflict markers in staged content.
+# Retires the rca-git-conflict-markers-2026-04-08 failure class.
+# References: kairos-pipeline-structural-audit-2026-04-24 (R-6).
+#
+# Bypass (ONLY for humans, NEVER for autonomous agents):
+#   git commit --no-verify
+#
+# Install per-repo:
+#   git config core.hooksPath /root/agentic-workflow/pipeline/git-hooks
+
+set -uo pipefail
+
+CHECK_OUTPUT=$(git diff --cached --check 2>&1 || true)
+
+if echo "$CHECK_OUTPUT" | grep -q "conflict marker"; then
+  echo ""
+  echo "=== R-6 pre-commit hook: conflict markers in staged content ==="
+  echo "$CHECK_OUTPUT" | grep -E "conflict marker" | head -30
+  echo ""
+  echo "Fix the markers, re-stage, and commit again."
+  echo "Autonomous agents: DO NOT use --no-verify. Fix the conflict properly."
+  exit 1
+fi
+
+exit 0
