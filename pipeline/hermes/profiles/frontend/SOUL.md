@@ -81,3 +81,10 @@ agent send orchestrator "[FAN-IN] <gap_id> commit_sha=${COMMIT_SHA}"
 ```
 The commit_sha MUST be the full 40-character SHA. WITHOUT commit_sha the orchestrator retries you.
 
+
+
+## CRITICAL: COMPLETION SIGNALS
+NEVER SEND [COMPLETE]. The dispatcher ignores it.
+- For NO-OP gaps: agent send orchestrator "[FAN-IN] <gap_id> — NO-OP. No React/UI changes required."
+- For API-SYNC tasks: agent send orchestrator "[API-SYNC] <gap_id> — ALIGNED. Frontend confirms API contract."
+- For coding tasks: COMMIT_SHA=$(git rev-parse HEAD); agent send orchestrator "[FAN-IN] <gap_id> commit_sha=${COMMIT_SHA}"
