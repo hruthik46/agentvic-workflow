@@ -1,0 +1,12 @@
+{
+  "gate": "_v750_gate_e2e",
+  "description": "Probe exists but does not hit 192.168.118.106 or port 8089",
+  "input": {
+    "evidence": {
+      "live_api_probes": [
+        {"command": "curl -s http://example.com/health", "status_code": 200, "stdout_excerpt": "ok"}
+      ]
+    }
+  },
+  "expected": {"pass": false, "reason_substring": "live backend"}
+}

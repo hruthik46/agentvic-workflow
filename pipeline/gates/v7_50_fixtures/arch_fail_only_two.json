@@ -1,0 +1,13 @@
+{
+  "gate": "_v750_gate_arch",
+  "description": "Only 2 probes; minimum is 3",
+  "input": {
+    "evidence": {
+      "real_env_probes": [
+        {"command": "govc ls /KRE-Lab", "stdout_excerpt": "vm host"},
+        {"command": "govc datastore.info vsanDatastore", "stdout_excerpt": "Type: vsan"}
+      ]
+    }
+  },
+  "expected": {"pass": false, "reason_substring": "need >="}
+}

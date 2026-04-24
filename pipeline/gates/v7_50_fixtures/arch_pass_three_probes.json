@@ -1,0 +1,14 @@
+{
+  "gate": "_v750_gate_arch",
+  "description": "3 real env probes with stdout_excerpt",
+  "input": {
+    "evidence": {
+      "real_env_probes": [
+        {"command": "govc ls /KRE-Lab", "stdout_excerpt": "vm host datastore"},
+        {"command": "govc datastore.info vsanDatastore", "stdout_excerpt": "Type: vsan"},
+        {"command": "govc find / -type h", "stdout_excerpt": "Cluster-01"}
+      ]
+    }
+  },
+  "expected": {"pass": true}
+}

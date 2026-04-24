@@ -1,0 +1,7 @@
+line before
+<<<<<<< HEAD
+local version
+=======
+remote version
+>>>>>>> feature-branch
+line after

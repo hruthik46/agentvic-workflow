@@ -1,0 +1,14 @@
+{
+  "gate": "_v750_gate_arch",
+  "description": "3 probes but one has empty stdout_excerpt",
+  "input": {
+    "evidence": {
+      "real_env_probes": [
+        {"command": "govc ls /KRE-Lab", "stdout_excerpt": "ok"},
+        {"command": "foo", "stdout_excerpt": ""},
+        {"command": "govc find /", "stdout_excerpt": "Cluster-01"}
+      ]
+    }
+  },
+  "expected": {"pass": false, "reason_substring": "missing stdout_excerpt"}
+}

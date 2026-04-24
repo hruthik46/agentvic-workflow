@@ -1,0 +1,6 @@
+{
+  "gate": "_v750_gate_e2e",
+  "description": "evidence dict has no live_api_probes key",
+  "input": {"evidence": {"real_env_probes": [{"cmd": "wrong-key"}]}},
+  "expected": {"pass": false, "reason_substring": "missing"}
+}

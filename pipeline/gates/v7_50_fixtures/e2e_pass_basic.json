@@ -1,0 +1,12 @@
+{
+  "gate": "_v750_gate_e2e",
+  "description": "Valid e2e review with a live probe hitting 192.168.118.106:8089",
+  "input": {
+    "evidence": {
+      "live_api_probes": [
+        {"command": "curl -s http://192.168.118.106:8089/api/v1/healthz", "status_code": 200, "stdout_excerpt": "{\"status\":\"ok\"}"}
+      ]
+    }
+  },
+  "expected": {"pass": true}
+}

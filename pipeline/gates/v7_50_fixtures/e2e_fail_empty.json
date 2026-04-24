@@ -1,0 +1,6 @@
+{
+  "gate": "_v750_gate_e2e",
+  "description": "live_api_probes empty — gate must reject",
+  "input": {"evidence": {"live_api_probes": []}},
+  "expected": {"pass": false, "reason_substring": "empty"}
+}
