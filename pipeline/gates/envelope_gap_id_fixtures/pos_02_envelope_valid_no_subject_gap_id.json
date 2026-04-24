@@ -1,0 +1,14 @@
+{
+  "gate": "envelope_first_gap_id",
+  "description": "Envelope has valid gap_id; subject carries no gap-id-shaped token. Envelope survives.",
+  "input": {
+    "from": "backend",
+    "gap_id": "REQ-VMWARE-AUDIT-001",
+    "subject": "[REQUIREMENT] describing the thing",
+    "body": "free-form body text without any embedded gap id"
+  },
+  "expected": {
+    "resolved_gap_id": "REQ-VMWARE-AUDIT-001",
+    "valid": true
+  }
+}

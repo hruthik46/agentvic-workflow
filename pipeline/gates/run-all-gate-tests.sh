@@ -32,6 +32,15 @@ else
 fi
 
 echo
+echo '=== R-3 Theme 1 envelope-first gap_id gate ==='
+if python3 /root/agentic-workflow/pipeline/gates/test_envelope_gap_id.py; then
+  echo 'envelope-gap-id: all fixtures matched expected outcome'
+else
+  echo 'envelope-gap-id: FIXTURE FAILURE'
+  FAIL_ANY=1
+fi
+
+echo
 if [ "$FAIL_ANY" = '0' ]; then
   echo '=== ALL GATE FIXTURES PASSED ==='
   exit 0

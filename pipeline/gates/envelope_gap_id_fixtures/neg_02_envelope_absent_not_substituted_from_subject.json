@@ -1,0 +1,13 @@
+{
+  "gate": "envelope_first_gap_id",
+  "description": "Envelope field is absent entirely. Envelope-first resolution returns None — the gate confirms subject prose is NOT silently substituted at the receive boundary (downstream v7.44 fallback is a separate, scoped behavior).",
+  "input": {
+    "from": "unknown",
+    "subject": "[EVENT] ARCH-IT-042 iteration 1",
+    "body": "gap_id=ARCH-IT-042"
+  },
+  "expected": {
+    "resolved_gap_id": null,
+    "valid": false
+  }
+}

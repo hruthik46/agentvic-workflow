@@ -1,0 +1,14 @@
+{
+  "gate": "envelope_first_gap_id",
+  "description": "Envelope has valid gap_id; subject contains wrong non-gap-formed prose. Envelope wins.",
+  "input": {
+    "from": "devops",
+    "gap_id": "ARCH-IT-042",
+    "subject": "[EVENT] WRONG-ID-IN-PROSE extra text",
+    "body": ""
+  },
+  "expected": {
+    "resolved_gap_id": "ARCH-IT-042",
+    "valid": true
+  }
+}

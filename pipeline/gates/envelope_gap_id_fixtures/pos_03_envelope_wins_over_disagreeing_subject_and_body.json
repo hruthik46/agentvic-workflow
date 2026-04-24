@@ -1,0 +1,14 @@
+{
+  "gate": "envelope_first_gap_id",
+  "description": "Envelope has valid gap_id; subject has a DIFFERENT valid gap_id AND body has yet a THIRD. Envelope still wins (v7.96 reconciler rebinds downstream but envelope-first resolution already picked envelope).",
+  "input": {
+    "from": "tester",
+    "gap_id": "ARCH-IT-042",
+    "subject": "[CODING-COMPLETE] ARCH-IT-099 iteration 2",
+    "body": "gap_id: ARCH-IT-077\nresults: ..."
+  },
+  "expected": {
+    "resolved_gap_id": "ARCH-IT-042",
+    "valid": true
+  }
+}
