@@ -1,0 +1,10 @@
+{
+  "description": "Future caller rpush'es a packet with bracketed subject but token[1] is the junk literal 'none' (LLM hallucination shape); regex rejects it, envelope_gap_id stays None.",
+  "input": {
+    "subject": "[CODING-COMPLETE] none iteration 1",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": null
+  }
+}

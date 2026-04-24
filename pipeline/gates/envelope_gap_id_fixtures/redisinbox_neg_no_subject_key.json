@@ -1,0 +1,10 @@
+{
+  "description": "agent-msg packet shape via Redis path: no subject key, no gap_id key. Promotion must skip cleanly so v7.67 empty-subject drop preserves implicit dedup with the file-inbox path.",
+  "input": {
+    "subject": "",
+    "data": {"from": "devops", "body": "ping body line\nmore body"}
+  },
+  "expected": {
+    "envelope_gap_id": null
+  }
+}

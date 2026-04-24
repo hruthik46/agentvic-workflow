@@ -374,6 +374,27 @@ def _inbox_fallback() -> list:
             # FIX v5.1: agent-msg uses 'message' field, but parse_message expects 'body'
             if "message" in data and "body" not in data:
                 data["body"] = data.pop("message")
+            # R-3 Theme 1 session #5: envelope-first gap_id for redis-inbox
+            # packets. Mirrors the file-inbox promotion landed in session #4.
+            # agent-msg/agent CLIs rpush packets without a "gap_id" field and
+            # without a "subject" field — current packets no-op (subject="" →
+            # promotion skips), and v7.67 empty-subject drop preserves the
+            # implicit dedup with _file_inbox_fallback. A FUTURE rpush caller
+            # that includes "subject" but omits "gap_id" will get envelope
+            # promotion, future-proofing handler-level Theme 1 retirements.
+            subject = data.get("subject", "")
+            # R-3-GATE: redis-inbox-envelope-promote-begin
+            envelope_gap_id = data.get("gap_id") or None
+            if not (envelope_gap_id and _GAP_ID_RE.match(envelope_gap_id)):
+                envelope_gap_id = None
+                if subject.startswith("["):
+                    _etoks = subject.split()
+                    if len(_etoks) >= 2:
+                        _cand = _etoks[1].rstrip(":,")
+                        if _GAP_ID_RE.match(_cand):
+                            envelope_gap_id = _cand
+            # R-3-GATE: redis-inbox-envelope-promote-end
+            data["gap_id"] = envelope_gap_id
             # Wrap as a pseudo stream message with a fake ID
             fake_id = f"inbox-{uuid.uuid4().hex[:8]}"
             print(f"[dispatcher] ← INBOX FALLBACK: {data.get('subject', 'N/A')}")

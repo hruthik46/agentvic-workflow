@@ -149,6 +149,9 @@ def extract_handler_resolver(source_path):
 FILEINBOX_BEGIN_MARKER = 'R-3-GATE: file-inbox-envelope-promote-begin'
 FILEINBOX_END_MARKER = 'R-3-GATE: file-inbox-envelope-promote-end'
 
+REDISINBOX_BEGIN_MARKER = 'R-3-GATE: redis-inbox-envelope-promote-begin'
+REDISINBOX_END_MARKER = 'R-3-GATE: redis-inbox-envelope-promote-end'
+
 
 def extract_fileinbox_promoter(source_path):
     """Extract the _file_inbox_fallback envelope-promotion block delimited by
@@ -201,6 +204,73 @@ def run_fileinbox_fixtures(fixtures_dir, gap_re, dispatcher_path):
     passes, fails = 0, 0
     for fname in sorted(os.listdir(fixtures_dir)):
         if not (fname.startswith('fileinbox_') and fname.endswith('.json')):
+            continue
+        fpath = os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        got = promoter(inp.get('subject', ''), inp.get('data', {}), gap_re)
+        if got == expected.get('envelope_gap_id'):
+            print(f'  OK   {fname} ({fixture.get("description", "")[:50]}) -> envelope_gap_id={got!r}')
+            passes += 1
+        else:
+            print(f'  FAIL {fname}: envelope_gap_id: got {got!r}, expected {expected.get("envelope_gap_id")!r}')
+            fails += 1
+    return passes, fails
+
+
+def extract_redisinbox_promoter(source_path):
+    """Extract the _inbox_fallback envelope-promotion block delimited by
+    R-3-GATE markers and return Python source for a callable
+    _redisinbox_promote(subject, data, _GAP_ID_RE) -> envelope_gap_id.
+    The block is at 12-space indent inside _inbox_fallback (nested in
+    try/while); dedent 12 to 4 so it runs inside our wrapper function."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if REDISINBOX_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif REDISINBOX_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE redis-inbox markers not found in dispatcher')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('            '):  # 12 spaces
+            dedented.append('    ' + ln[12:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError(f'unexpected indent in redis-inbox block: {ln!r}')
+    return (
+        'def _redisinbox_promote(subject, data, _GAP_ID_RE):\n'
+        + '\n'.join(dedented)
+        + '\n    return envelope_gap_id\n'
+    )
+
+
+def run_redisinbox_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run redisinbox_*.json fixtures through the extracted promoter.
+    Each fixture's input has subject + data (raw redis packet dict);
+    expected has envelope_gap_id. Mirrors run_fileinbox_fixtures."""
+    import tempfile, runpy
+    wrapper_src = extract_redisinbox_promoter(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        os.unlink(tf_path)
+    promoter = ns['_redisinbox_promote']
+
+    passes, fails = 0, 0
+    for fname in sorted(os.listdir(fixtures_dir)):
+        if not (fname.startswith('redisinbox_') and fname.endswith('.json')):
             continue
         fpath = os.path.join(fixtures_dir, fname)
         with open(fpath) as f:
@@ -283,7 +353,7 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_')):
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_')):
             continue  # handler-path + file-inbox fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
@@ -327,6 +397,15 @@ def main():
     fi_pass, fi_fail = run_fileinbox_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += fi_pass
     fails += fi_fail
+
+    # R-3 Theme 1 session #5 coverage: redis-inbox envelope promotion.
+    # Exercises the envelope-promote block (inside _inbox_fallback, gated
+    # by R-3-GATE markers) against redisinbox_*.json fixtures. Backs every
+    # retirement whose handler is reachable via the agent-msg Redis path,
+    # now that redis-inbox supplies canonical envelope gap_id.
+    ri_pass, ri_fail = run_redisinbox_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += ri_pass
+    fails += ri_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

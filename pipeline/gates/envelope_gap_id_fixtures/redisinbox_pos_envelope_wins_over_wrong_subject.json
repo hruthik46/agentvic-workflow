@@ -1,0 +1,10 @@
+{
+  "description": "Future caller rpush'es packet with valid envelope gap_id and subject embedding a DIFFERENT one. Promoter keeps envelope (v7.81b honor re-inject — must hold on Redis path too).",
+  "input": {
+    "subject": "[CODING-COMPLETE] WRONG-GID iteration 1",
+    "data": {"gap_id": "ARCH-IT-055"}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-055"
+  }
+}
