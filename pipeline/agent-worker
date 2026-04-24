@@ -718,6 +718,14 @@ def run_hermes_pty(task: str, agent_name: str, gap_id: str = None,
     to Langfuse as a generation observation with tool_use count + exit code.
     """
     import signal as _signal
+
+    # R-2 pilot (2026-04-24): envelope-first gap_id propagation.
+    # Expose the envelope's gap_id to Hermes and every tool subprocess it spawns,
+    # so consuming agents can source $KARIOS_GAP_ID instead of re-parsing the
+    # subject line (root cause of the FAN-OUT/CODE-REQUEST hallucination family).
+    # Dead weight for agents whose SOUL.md hasn't adopted R-2 yet; harmless.
+    os.environ["KARIOS_GAP_ID"] = gap_id or ""
+
     # v7.19: open Langfuse generation span (no-op if Langfuse disabled)
     _v719_span_cm = None
     _v719_span = None
