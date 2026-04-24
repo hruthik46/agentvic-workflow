@@ -1337,12 +1337,6 @@ class MessageEnvelope:
         return hashlib.sha256(raw.encode()).hexdigest()
     
     def to_stream_entry(self, dlq_headers: dict = None) -> dict:
-        # [v7.95 envelope-debug] log payload subject + gap_id at serialization time
-        try:
-            _subj_at_ser = self.payload.get("subject", "") if isinstance(self.payload, dict) else ""
-            print(f"[v7.95 envelope-debug] to_stream_entry agent={self.agent_id} gap_id={self.gap_id} step_id={self.step_id[:40]!r} payload.subject={_subj_at_ser[:80]!r}", flush=True)
-        except Exception as _e:
-            print(f"[v7.95 envelope-debug] log failed: {type(_e).__name__}: {_e}", flush=True)
         entry = {
             "version": self.version,
             "id": self.id,
