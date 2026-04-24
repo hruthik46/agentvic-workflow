@@ -16,7 +16,11 @@ Your job is to:
 2. Read coordination files (MUST before starting any feature)
 3. Implement the Go code
 4. Write unit tests (coverage MUST increase)
-5. Run `go test ./...` — MUST pass before committing
+5. Run pre-commit validation (ALL THREE must pass BEFORE committing):
+   go build ./... MUST succeed — build errors mean DO NOT COMMIT
+   go vet ./...   MUST succeed — vet errors mean DO NOT COMMIT
+   go test ./...  MUST succeed — test failures mean DO NOT COMMIT
+   NEVER commit code that fails any of these three checks.
 6. Commit + push to branch `backend/<gap-id>-<date>`
 7. Update api-contract.json if new endpoints added
 8. Write Obsidian summary
@@ -31,28 +35,58 @@ Your job is to:
 ## SIGNALING COMPLETION — CRITICAL
 
 After committing and pushing code, you MUST signal the orchestrator with the EXACT commit SHA.
-WITHOUT commit_sha the orchestrator REFUSES the FAN-IN and retries you.
+WITHOUT commit_sha the orchestrator REFUSES the task and retries you.
 
-MANDATORY pattern:
-  COMMIT_SHA=$(git -C <repo_dir> rev-parse HEAD)
-  agent send orchestrator "[FAN-IN] <gap_id> commit_sha=${COMMIT_SHA}"
+NEVER SEND [COMPLETE]. [COMPLETE] is ignored by the dispatcher and leaves the gap permanently stalled.
 
-The string "commit_sha=<40-hex-sha>" MUST appear in the message subject or body.
-Do NOT send [FAN-IN] before committing. Do NOT omit the commit_sha.
+MANDATORY pattern — ALWAYS verify a commit exists for our changes BEFORE signaling:
+
+  cd <repo_dir>
+  git add -A
+  # Only commit if there are actual changes — prior session may have already committed.
+  if [ -n "$(git status --porcelain)" ]; then
+    git commit -m "feat(<gap_id>): <desc>" || { echo "ERROR: commit failed"; exit 1; }
+  else
+    echo "INFO: working tree clean — using existing HEAD (prior session committed)"
+  fi
+  # Guard 1: working tree must be clean (either we committed or it was already clean)
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "ERROR: working tree still dirty — aborting"; exit 1
+  fi
+  # Guard 2: HEAD must resolve to a valid 40-hex SHA
+  COMMIT_SHA=$(git rev-parse HEAD)
+  if ! echo "$COMMIT_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+    echo "ERROR: invalid commit SHA '$COMMIT_SHA' — aborting"; exit 1
+  fi
+  # Guard 3: push must succeed (otherwise devops won't find the branch)
+  BRANCH=$(git branch --show-current)
+  git push origin HEAD || { echo "ERROR: push failed — devops will 404"; exit 1; }
+  # Guard 4: verify branch actually exists on remote
+  git ls-remote --heads origin "$BRANCH" | grep -q "$COMMIT_SHA" || { echo "ERROR: remote branch missing SHA"; exit 1; }
+  # Only now is it safe to signal
+  agent send orchestrator "[CODING-COMPLETE] <gap_id> commit_sha=${COMMIT_SHA} branch=${BRANCH}"
+
+The string "commit_sha=<40-hex-sha>" MUST appear in the message.
+Do NOT send [CODING-COMPLETE] before committing. Do NOT omit the commit_sha.
 Do NOT use a short sha — use the full 40-character SHA from git rev-parse HEAD.
+If ANY guard above fails, do NOT send the signal — the gap is not ready.
 
 ## SAMPLE WORKFLOW (karios-migration gap)
 
 ```bash
 # 1. implement code in /root/karios-source-code/karios-migration
-# 2. run tests
-cd /root/karios-source-code/karios-migration && go test ./... 2>&1
-# 3. commit
+# 2. MANDATORY pre-commit validation (ALL 3 must pass)
+cd /root/karios-source-code/karios-migration
+go build ./... 2>&1 || { echo "ERROR: go build failed — DO NOT COMMIT"; exit 1; }
+go vet ./... 2>&1   || { echo "ERROR: go vet failed — DO NOT COMMIT"; exit 1; }
+go test ./... 2>&1  || { echo "ERROR: go test failed — DO NOT COMMIT"; exit 1; }
+# 3. commit (ONLY after all 3 above pass)
 git add -A && git commit -m "feat(<gap_id>): <description>"
 git push origin HEAD
 # 4. signal with SHA — MANDATORY
 COMMIT_SHA=$(git rev-parse HEAD)
-agent send orchestrator "[FAN-IN] <gap_id> commit_sha=${COMMIT_SHA}"
+  BRANCH=$(git branch --show-current)
+  agent send orchestrator "[CODING-COMPLETE] <gap_id> commit_sha=${COMMIT_SHA} branch=${BRANCH}"
 ```
 
 ## SAMPLE WORKFLOW (sample/standalone gap — NOT in karios-migration)
@@ -61,11 +95,14 @@ For gaps that specify a standalone file or script (not karios-migration):
 ```bash
 # implement in the specified directory (e.g. /root/karios-sample/<gap-name>/)
 cd /root/karios-sample/<gap-name>
-go test ./... 2>&1
+go build ./... 2>&1 || { echo "ERROR: go build failed"; exit 1; }
+go vet ./... 2>&1   || { echo "ERROR: go vet failed"; exit 1; }
+go test ./... 2>&1  || { echo "ERROR: go test failed"; exit 1; }
 git add -A && git commit -m "feat(<gap_id>): <description>"
 git push origin HEAD
 COMMIT_SHA=$(git rev-parse HEAD)
-agent send orchestrator "[FAN-IN] <gap_id> commit_sha=${COMMIT_SHA}"
+  BRANCH=$(git branch --show-current)
+  agent send orchestrator "[CODING-COMPLETE] <gap_id> commit_sha=${COMMIT_SHA} branch=${BRANCH}"
 ```
 
 
