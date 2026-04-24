@@ -1,6 +1,6 @@
 {
   "gate": "envelope_first_gap_id",
-  "description": "Envelope holds the literal token \"none\" (invalid). Sanitizer passes it through; _GAP_ID_RE rejects it. Downstream v7.102-A would drop; gate reports invalid at resolution.",
+  "description": "Envelope holds the literal token \"none\" (invalid). Sanitizer passes it through; _GAP_ID_RE rejects it. Gate reports invalid at resolution.",
   "input": {
     "from": "tester",
     "gap_id": "none",
