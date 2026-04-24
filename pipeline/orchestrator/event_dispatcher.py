@@ -976,7 +976,7 @@ def fan_out(gap_id: str, agents: list, task_subject: str,
         # send_to_agent() correctly XADDs to stream:{agent}.
         send_to_agent(
             agent,
-            f"[FAN-OUT] {task_subject} {gap_id}",
+            f"[FAN-OUT] gap={gap_id} {task_subject}",
             f"{task_body}\n\nThis is a PARALLEL task. Other agents also working: {agents_active}.\nSend [FAN-IN] <gap_id> when done. Your trace_id is {tid}.",
             gap_id=gap_id,
             trace_id=tid,
@@ -3621,7 +3621,7 @@ def progress_probe_check():
                         # v7.91.3: orphan-detector pre-clears stale idem so re-dispatch can SETNX; root cause is ghost-drop from gap_id mutation bug
                         _subject = None
                         if _phase_norm in ("3-coding", "3-coding-sync"):
-                            _subject = f"[FAN-OUT] [CODE-REQUEST] {gap_id} {gap_id}"
+                            _subject = f"[FAN-OUT] gap={gap_id} [CODE-REQUEST] {gap_id}"
                         elif _phase_norm in ("1-research", "2-arch-loop", "2-architecture"):
                             _subject = f"[ARCHITECT] {gap_id}"
                         elif _phase_norm in ("4-testing",):
