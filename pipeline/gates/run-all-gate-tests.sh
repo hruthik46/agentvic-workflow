@@ -1,6 +1,6 @@
 #!/bin/bash
 # R-4 master fixture runner — runs every gate's fixture suite, aggregates pass/fail.
-# Add new gates by putting their test runner in this script.
+# Add new gates by appending a block to this script.
 set -u
 
 FAIL_ANY=0
@@ -19,6 +19,15 @@ if python3 /root/agentic-workflow/pipeline/gates/test_v7_50.py; then
   echo 'v7.50: all fixtures matched expected outcome'
 else
   echo 'v7.50: FIXTURE FAILURE'
+  FAIL_ANY=1
+fi
+
+echo
+echo '=== SOUL.md inline-Python lint ==='
+if python3 /root/agentic-workflow/pipeline/gates/test_soul_md_python.py; then
+  echo 'SOUL.md: all inline Python snippets parse cleanly (templates substituted)'
+else
+  echo 'SOUL.md: one or more snippets failed to parse — ARCH-IT-091 class regression possible'
   FAIL_ANY=1
 fi
 
