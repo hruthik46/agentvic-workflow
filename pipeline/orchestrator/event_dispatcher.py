@@ -87,7 +87,7 @@ from concurrent.futures import ThreadPoolExecutor
 # Item A (ARCH-IT-ARCH-v11): Pydantic schema validation at message boundary
 # LOG_ONLY=True for iteration 1 (log violations, don't quarantine/reject)
 try:
-    from orchestrator.message_schemas import validate_message, LOG_ONLY_MODE
+    from message_schemas import validate_message, LOG_ONLY_MODE
 except ImportError:
     # Fallback if message_schemas not available
     def validate_message(subject, body):
@@ -553,7 +553,7 @@ ROUTING_FAST_TRACK = 9   # rating >= 9: skip ahead, minimal iterations
 ROUTING_ESCALATE_NOW = 0  # v7.15: never escalate on rating; always revise (per Sai) # rating < 4: escalate immediately
 ROUTING_MEDIUM = 8       # v7.15: retry/revise threshold = 8 per Sai       # 4 <= rating < 7: normal retry with self-diagnosis
 
-def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dict:
+def compute_routing(gap_id: str, phase: str, iteration: int, rating: int, k_max: int = 8) -> dict:  # v7.108-A: k_max param
     """
     Dynamic routing based on agent output quality.
     Returns: {route: "fast_track" | "normal" | "escalate", next_action: str, iterations_left: int}
@@ -562,7 +562,7 @@ def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dic
         return {
             "route": "fast_track",
             "next_action": "proceed",
-            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
+            "iterations_left": max(0, k_max - iteration),  # v7.108-A: use caller-supplied k_max
             "reason": f"rating {rating} >= {ROUTING_FAST_TRACK} — fast track"
         }
     elif rating < ROUTING_ESCALATE_NOW:
@@ -576,14 +576,14 @@ def compute_routing(gap_id: str, phase: str, iteration: int, rating: int) -> dic
         return {
             "route": "normal",
             "next_action": "retry_with_self_diagnosis",
-            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
+            "iterations_left": max(0, k_max - iteration),  # v7.108-A: use caller-supplied k_max
             "reason": f"rating {rating} < {ROUTING_MEDIUM} — retry with self-correction"
         }
     else:
         return {
             "route": "normal",
             "next_action": "retry",
-            "iterations_left": max(0, 8 - iteration),  # v7.15: K_max=8 for all phases per Sai
+            "iterations_left": max(0, k_max - iteration),  # v7.108-A: use caller-supplied k_max
             "reason": f"rating {rating} >= {ROUTING_MEDIUM} — standard retry"
         }
 
@@ -646,6 +646,8 @@ def classify_error(error_text: str) -> tuple:
         "deployment-failure":      "deployment",
         "rollback-required":       "deployment",
         "image-pull-error":        "deployment",
+        "stale-binary":            "deployment",  # v7.109-A: binary not rebuilt after code change
+        "missing-endpoint":        "deployment",  # v7.109-A: 404 on existing route = stale binary
         # concurrency / safety
         "race-condition":          "race_condition",
         "null-pointer":            "null_pointer",
@@ -884,7 +886,7 @@ def telegram_alert(message: str):
 
 # ── Fan-Out / Fan-In Pattern ─────────────────────────────────────────────────
 FAN_STATE_FILE = ORCHESTRATOR_DIR / "fan-state.json"
-_GAP_ID_RE = re.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9]')  # v7.81b: matches ARCH-IT-070, TEST-FLOW-DISKFB, REQ-VMWARE-AUDIT-001
+_GAP_ID_RE = re.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9a-z]+$')  # v7.112-A: END-ANCHORED -- prevents prose bleed. Includes a-z for version suffixes (v11, v6).
 
 def notify_phase_transition(gap_id: str, from_agent: str, to_agent: str,
                               event: str, rating=None, score_max=10, summary: str = ""):
@@ -976,7 +978,7 @@ def fan_out(gap_id: str, agents: list, task_subject: str,
         # send_to_agent() correctly XADDs to stream:{agent}.
         send_to_agent(
             agent,
-            f"[FAN-OUT] gap={gap_id} {task_subject}",
+            f"[FAN-OUT] {task_subject} {gap_id}",
             f"{task_body}\n\nThis is a PARALLEL task. Other agents also working: {agents_active}.\nSend [FAN-IN] <gap_id> when done. Your trace_id is {tid}.",
             gap_id=gap_id,
             trace_id=tid,
@@ -2156,19 +2158,58 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
                        error_type="architecture")
 
     # ── Dynamic Routing ─────────────────────────────────────────────────────
-    routing = compute_routing(gap_id, "2-arch-loop", iteration, rating)
+    routing = compute_routing(gap_id, "2-arch-loop", iteration, rating, k_max=_arch_k_max)  # v7.108-B
     print(f"[dispatcher] Dynamic routing for {gap_id} iter {iteration}: {routing}")
 
-    if rating >= 8:  # v6.0 FIX: was 10 (impossibly strict — docs say >=8)
+    if routing["route"] == "fast_track":  # v7.112-C: check fast_track FIRST so rating=9 gets one polish iteration (was dead code due to if rating>=8 catch-all)
+        # Very high rating: proceed even if not 10/10, with minimal extra iterations
+        update_gap_phase(gap_id, "2-arch-loop", iteration=iteration + 1, trace_id=tid,
+                         last_rating=rating, last_issues=critical_issues, fast_tracked=True)
+        send_to_agent("architect",
+                      f"[ARCH-FAST-TRACK] {gap_id} — rating {rating} \u2265 {ROUTING_FAST_TRACK}, final iteration",
+                      f"Excellent architecture (rating={rating}/10).\n"
+                      f"Minor issues to address:\n" + "\n".join(f"- {i}" for i in critical_issues) + "\n\n"
+                      f"One final iteration to address these quickly, then proceed to coding.\n\n"
+                      f"OUTPUT: Write ALL 5 docs to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration + 1}/\n"
+                      f"  - architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md\n"
+                      f"Then: agent send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {iteration + 1}'",
+                      gap_id=gap_id, trace_id=tid)
+        telegram_alert(f"\u26a1 *{gap_id}*: Arch FAST-TRACK (rating {rating}/{ROUTING_FAST_TRACK}) — one polish iteration before coding.")
+        print(f"[dispatcher] Gap {gap_id} ARCH FAST-TRACK: rating {rating} >= {ROUTING_FAST_TRACK} (v7.112-C: now reachable)")
+
+    elif rating >= 8:  # v6.0 FIX: was 10 (impossibly strict — docs say >=8); v7.112-C: only reached for rating=8 now
         transition_phase(gap_id, "3-coding", agent="architect", iteration=0, trace_id=tid,
                         _prev_phase="2-arch-loop")
         update_agent_checkpoint("architect", phase="idle", arch_complete=False, docs_ready=False)
         update_agent_checkpoint("backend", phase="phase-3-waiting")
         update_agent_checkpoint("frontend", phase="phase-3-waiting")
+        # v7.112-D: Clear noop_agents and api_sync_confirmed on arch->coding transition.
+        # Stale noop_agents from previous coding iteration silently pre-confirm API-SYNC
+        # for agents that may have real work in the new iteration. Reset both here.
+        try:
+            _v7112d_gap = load_gap(gap_id) or {}
+            _had_noops = _v7112d_gap.get("noop_agents", [])
+            _had_sync = _v7112d_gap.get("api_sync_confirmed", [])
+            if _had_noops or _had_sync:
+                _v7112d_gap["noop_agents"] = []
+                _v7112d_gap["api_sync_confirmed"] = []
+                save_gap(gap_id, _v7112d_gap)
+                print(f"[dispatcher] v7.112-D: cleared noop_agents={_had_noops} + api_sync_confirmed={_had_sync} for {gap_id} on arch->coding transition")
+        except Exception as _v7112d_e:
+            print(f"[dispatcher] v7.112-D noop reset failed (non-fatal): {_v7112d_e}")
 
         # Hierarchical fan-out: decompose if needed
         decomp = decompose_and_fan_out(gap_id, "coding", ["backend", "frontend"], parent_trace_id=tid)
         _update_active_gap_state(gap_id, phase="phase-3-coding", state="active", iteration=iteration, trace_id=tid)
+        # v7.116-B: set assigned_agent so v7.115-B nudge-cap cannot treat a fresh
+        # coding gap (with no session yet) as an unassigned orphan.
+        try:
+            _v7116b_state = load_state()
+            _v7116b_state["active_gaps"][gap_id]["assigned_agent"] = "backend"
+            save_state(_v7116b_state)
+            print(f"[dispatcher] v7.116-B: set assigned_agent=backend for {gap_id} on arch->coding transition")
+        except Exception as _v7116b_e:
+            print(f"[dispatcher] v7.116-B assigned_agent set failed (non-fatal): {_v7116b_e}")
 
         learnings = retrieve_relevant_learnings(phase="3-coding", limit=5)
         learnings_context = format_learnings_for_context(learnings)
@@ -2208,22 +2249,6 @@ When done, send [FAN-IN] {gap_id} — do NOT contact tester directly.""",
                           f"Critical issues:\n" + "\n".join(f"- {i}" for i in critical_issues),
                           rating=rating, iteration=iteration)
         print(f"[dispatcher] Gap {gap_id} IMMEDIATE ESCALATION (rating {rating}/10)")
-
-    elif routing["route"] == "fast_track":
-        # Very high rating: proceed even if not 10/10, with minimal extra iterations
-        update_gap_phase(gap_id, "2-arch-loop", iteration=iteration + 1, trace_id=tid,
-                         last_rating=rating, last_issues=critical_issues, fast_tracked=True)
-        send_to_agent("architect",
-                      f"[ARCH-FAST-TRACK] {gap_id} — rating {rating} ≥ {ROUTING_FAST_TRACK}, final iteration",
-                      f"Excellent architecture (rating={rating}/10).\n"
-                      f"Minor issues to address:\n" + "\n".join(f"- {i}" for i in critical_issues) + "\n\n"
-                      f"One final iteration to address these quickly, then proceed to coding.\n\n"
-                      f"OUTPUT: Write ALL 5 docs to /var/lib/karios/iteration-tracker/{gap_id}/phase-2-arch-loop/iteration-{iteration + 1}/\n"
-                      f"  - architecture.md, api-contract.md, test-cases.md, edge-cases.md, deployment-plan.md\n"
-                      f"Then: agent send orchestrator '[ARCH-COMPLETE] {gap_id} iteration {iteration + 1}'",
-                      gap_id=gap_id, trace_id=tid)
-        print(f"[dispatcher] Gap {gap_id} FAST-TRACK: rating {rating} >= {ROUTING_FAST_TRACK}")
-
     elif routing["next_action"] == "retry_with_self_diagnosis":
         combined_issues = " ".join(str(i) if not isinstance(i, str) else i for i in critical_issues)  # v7.15: coerce dict items
         can_resolve, strategy, needs_escalate = self_diagnose(
@@ -2509,50 +2534,6 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
     recommendation = str(recommendation or "").strip().upper()
     if recommendation not in ("APPROVE", "REQUEST_CHANGES", "REJECT"):
         recommendation = "REQUEST_CHANGES"
-
-    # v8.0-A: Escalation gate -- drop E2E results if gap is already escalated.
-    # escalate_to_human() writes state=escalated but handle_e2e_results never checked it,
-    # so the pipeline kept re-dispatching CBT forever after escalation.
-    try:
-        _esc_state = load_state()
-        _esc_entry = _esc_state.get("active_gaps", {}).get(gap_id, {})
-        if _esc_entry.get("state") == "escalated":
-            print(f"[dispatcher] v8.0-A DROP E2E results for {gap_id} iter {iteration} -- gap is escalated, human must intervene first")
-            try:
-                telegram_alert(f"INFO {gap_id}: E2E iter {iteration} results dropped -- gap escalated. No action until human resolves.")
-            except Exception:
-                pass
-            return
-    except Exception as _esc_e:
-        print(f"[dispatcher] v8.0-A escalation check failed (non-blocking): {_esc_e}")
-
-    # v8.0-B: Convergence detector -- escalate when CBT rating stops improving.
-    # Prevents infinite CBT loop when a structural bug keeps rating flat (e.g. 3/10 x N iters).
-    if iteration >= 3:
-        try:
-            _gap_dir = IT_DIR / gap_id / "phase-3-coding"
-            _prev_r = _prev2_r = None
-            _p1 = _gap_dir / f"iteration-{iteration-1}" / "e2e-results.json"
-            _p2 = _gap_dir / f"iteration-{iteration-2}" / "e2e-results.json"
-            if _p1.exists():
-                _prev_r = json.loads(_p1.read_text()).get("rating", 0)
-            if _p2.exists():
-                _prev2_r = json.loads(_p2.read_text()).get("rating", 0)
-            if _prev_r is not None and _prev2_r is not None and rating <= _prev_r and _prev_r <= _prev2_r:
-                _stall_msg = f"CBT ratings {_prev2_r}->{_prev_r}->{rating} across iters {iteration-2}-{iteration} (no improvement)"
-                print(f"[dispatcher] v8.0-B CONVERGENCE STALL {gap_id}: {_stall_msg} -- escalating")
-                try:
-                    telegram_alert(f"ESCALATE {gap_id}: {_stall_msg}")
-                except Exception:
-                    pass
-                _issues_str = "; ".join(str(i) for i in critical_issues[:5])
-                escalate_to_human(gap_id, "CBT rating not converging",
-                                  f"{_stall_msg}. Issues: {_issues_str}",
-                                  rating=rating, iteration=iteration)
-                return
-        except Exception as _conv_e:
-            print(f"[dispatcher] v8.0-B convergence check failed (non-blocking): {_conv_e}")
-
     # v7.50: live-API evidence gate
     _v750_review = {"rating": rating, "critical_issues": critical_issues,
                     "evidence": evidence or {}, "summary": ""}  # v7.65: use actual evidence
@@ -2628,7 +2609,8 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                     agent="code-blind-tester", subtype="e2e_review")
 
     # ── Dynamic Routing ─────────────────────────────────────────────────────
-    routing = compute_routing(gap_id, "3-coding", iteration, rating)
+    _coding_k_max = _pipeline_cfg().get("coding_k_max", 12)  # v7.111-A: configurable k_max
+    routing = compute_routing(gap_id, "3-coding", iteration, rating, k_max=_coding_k_max)  # v7.111-A
     print(f"[dispatcher] E2E dynamic routing for {gap_id} iter {iteration}: {routing}")
 
     # ── Output Verification (v4.0) ─────────────────────────────────────────
@@ -2649,7 +2631,7 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
             print(f"[dispatcher] E2E verifier non-blocking error: {type(_verr).__name__}: {_verr}")
         # Note: E2E results are already structured JSON, so we don't fail on decision alone
 
-    if rating >= 8:  # v6.0 FIX: was 10 (impossibly strict — docs say >=8)
+    if rating >= 8 and routing["route"] != "fast_track":  # v7.112-C: exclude fast_track (rating=9) so it can be reached below; v6.0: was 10
         # v7.79: if prod was already deployed before Phase 4 (v7.79 gate), skip re-deploy
         try:
             _v779_re_state = load_state()
@@ -2709,19 +2691,39 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
         print(f"[dispatcher] Gap {gap_id} IMMEDIATE ESCALATION (E2E rating {rating}/10)")
 
     elif routing["route"] == "fast_track":
+        # v7.111-C: cap fast-track at coding_k_max — prevents infinite FAST-REDEPLOY loop
+        # Root cause: rating 7-8 can enter fast_track indefinitely with no hard stop
+        if iteration >= _coding_k_max:
+            print(f"[dispatcher] v7.111-C FAST-TRACK HARD ESCALATE {gap_id} iter={iteration}/{_coding_k_max} — rating {rating} never passed")
+            if _GAP_ID_RE.match(gap_id or ""):
+                try:
+                    _v7111c_st = load_state()
+                    _v7111c_st.setdefault("active_gaps", {}).setdefault(gap_id, {}).update(
+                        {"state": "escalated", "phase": "escalated", "iteration": iteration})
+                    save_state(_v7111c_st)
+                except Exception as _v7111c_se:
+                    print(f"[dispatcher] v7.111-C state freeze failed: {_v7111c_se}")
+            try:
+                telegram_alert(f"🚨 *{gap_id}*: FAST-TRACK HARD ESCALATE — stuck at {iteration}/{_coding_k_max} iters. Rating {rating}/10 never reached pass threshold.")
+                escalate_to_human(gap_id, f"Fast-track coding loop exhausted at iteration {iteration}",
+                                  f"Rating {rating}/10 for {iteration} iterations. Never reached pass threshold of 8. Needs human diagnosis.",
+                                  rating=rating, iteration=iteration)
+            except Exception:
+                pass
+            return
         update_gap_phase(gap_id, "3-coding", iteration=iteration + 1, trace_id=tid,
                          last_rating=rating, last_issues=critical_issues, fast_tracked=True)
         send_to_agent("devops",
                       f"[FAST-REDEPLOY] {gap_id}",
                       f"E2E rating {rating} ≥ {ROUTING_FAST_TRACK}. Quick final check, then deploy to prod.",
                       gap_id=gap_id, trace_id=tid)  # v7.64: add missing kwargs
-        print(f"[dispatcher] Gap {gap_id} E2E FAST-TRACK: rating {rating}")
+        print(f"[dispatcher] Gap {gap_id} E2E FAST-TRACK: rating {rating} (iter {iteration}/{_coding_k_max})")
 
     elif routing["next_action"] == "retry_with_self_diagnosis":
         combined_issues = " ".join(str(i) if not isinstance(i, str) else i for i in critical_issues)  # v7.15: coerce dict items
 
-        # v7.27-D: HARD K_MAX ESCALATION at iteration > 8
-        if iteration >= 8:
+        # v7.27-D: HARD K_MAX ESCALATION — v7.111-B: use coding_k_max from pipeline config
+        if iteration >= _coding_k_max:  # v7.111-B
             if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-C: never persist invalid gap_ids
                 print(f"[dispatcher] v7.104-C SKIP v7.27-D escalate invalid gap_id={gap_id!r}")
             else:
@@ -2732,7 +2734,7 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                     _v727d_state["active_gaps"][gap_id]["iteration"] = iteration
                     _v727d_state["active_gaps"][gap_id]["phase"] = "escalated"
                     _v727d_state_path.write_text(json.dumps(_v727d_state, indent=2))
-                    print(f"[dispatcher] v7.27-D HARD ESCALATE {gap_id} iter={iteration}/8 — state frozen")
+                    print(f"[dispatcher] v7.27-D HARD ESCALATE {gap_id} iter={iteration}/{_coding_k_max} — state frozen  # v7.111-D")  # v7.111-D: was /8 literal
                 except Exception as _v727d_e:
                     print(f"[dispatcher] v7.27-D state freeze failed: {_v727d_e}")
             try:
@@ -2798,6 +2800,12 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
         can_resolve, strategy, needs_escalate = self_diagnose(
             gap_id, "3-coding", iteration, rating, combined_issues)
 
+        # v7.108-C: mirror v7.88 arch-loop override — self_diagnose escalates too eagerly;
+        # if K_max still has iterations remaining, keep retrying instead of escalating.
+        if needs_escalate and routing.get("iterations_left", 0) > 0:
+            needs_escalate = False
+            print(f"[dispatcher] v7.108-C coding loop: self_diagnose wanted escalate but {routing['iterations_left']} iters remain — forcing retry for {gap_id}")
+
         if needs_escalate:
             transition_phase(gap_id, "escalated", agent="backend", iteration=iteration, trace_id=tid)
             update_agent_checkpoint("backend", phase="escalated", iteration=iteration)
@@ -2849,21 +2857,42 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
                 if _v7232_cat in ("infra", "deployment"):
                     # v7.32: detailed infra issue rendering for devops
                     _v7232_issues_short = format_critical_issues_for_revise(critical_issues, kind="code")
-                    _v7232_devops_body = (
-                        f"INFRA/DEPLOYMENT issue — devops action required. Gap {gap_id} iter {next_iter}.\n\n"
-                        f"PRIOR E2E RATING: {rating}/10 (REJECT). Self-diagnosis: {strategy}\n\n"
-                        f"INFRA ISSUES TO RESOLVE:\n{_v7232_issues_short}\n\n"
-                        f"REQUIRED FIRST 3 TOOL CALLS (no prose):\n"
-                        f"  1. bash: systemctl status karios-migration --no-pager 2>&1 | head -30\n"
-                        f"  2. bash: journalctl -u karios-migration --no-pager -n 50\n"
-                        f"  3. bash: cat /etc/systemd/system/karios-migration.service && cat /etc/karios/secrets.env 2>&1 | grep -i database\n\n"
-                        f"After identifying the env/service/config issue:\n"
-                        f"  - fix /etc/karios/secrets.env or systemd unit\n"
-                        f"  - systemctl daemon-reload && systemctl restart karios-migration\n"
-                        f"  - verify with: curl -sI http://localhost:8089/api/v1/healthz\n"
-                        f"  - confirm with: agent send orchestrator '[INFRA-FIXED] {gap_id} iteration {next_iter}'\n"
-                        f"DO NOT touch Go code. ONLY fix infra/env/service config."
+                    # v7.109-B: stale-binary needs go build, not config fix
+                    _v7109_is_stale = any(
+                        str(i).lower().find("stale-binary") >= 0 or
+                        (isinstance(i, dict) and i.get("category", "") in ("stale-binary", "missing-endpoint"))
+                        for i in critical_issues
                     )
+                    if _v7109_is_stale:
+                        _v7232_devops_body = (
+                            f"STALE BINARY — rebuild required. Gap {gap_id} iter {next_iter}.\n\n"
+                            f"PRIOR E2E RATING: {rating}/10. All routes returning 404 = binary not rebuilt after last commit.\n\n"
+                            f"REQUIRED STEPS (execute in order, no prose):\n"
+                            f"  1. git -C /root/karios-source-code/karios-migration fetch --all --prune\n"
+                            f"  2. BRANCH=$(git -C /root/karios-source-code/karios-migration for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin/ | grep 'backend/{gap_id}' | head -1 | sed 's|origin/||')\n"
+                            f"  3. git -C /root/karios-source-code/karios-migration checkout ${{BRANCH:-main}}\n"
+                            f"  4. cd /root/karios-source-code/karios-migration && go build -o /usr/local/bin/karios-migration ./cmd/karios-migration/\n"
+                            f"  5. systemctl restart karios-migration && sleep 3 && systemctl is-active karios-migration\n"
+                            f"  6. curl -s http://localhost:8089/api/v1/healthz\n"
+                            f"  7. agent send orchestrator '[INFRA-FIXED] {gap_id} iteration {next_iter}'\n\n"
+                            f"DO NOT touch Go code. The code is correct — only the binary is stale."
+                        )
+                    else:
+                        _v7232_devops_body = (
+                            f"INFRA/DEPLOYMENT issue — devops action required. Gap {gap_id} iter {next_iter}.\n\n"
+                            f"PRIOR E2E RATING: {rating}/10 (REJECT). Self-diagnosis: {strategy}\n\n"
+                            f"INFRA ISSUES TO RESOLVE:\n{_v7232_issues_short}\n\n"
+                            f"REQUIRED FIRST 3 TOOL CALLS (no prose):\n"
+                            f"  1. bash: systemctl status karios-migration --no-pager 2>&1 | head -30\n"
+                            f"  2. bash: journalctl -u karios-migration --no-pager -n 50\n"
+                            f"  3. bash: cat /etc/systemd/system/karios-migration.service && cat /etc/karios/secrets.env 2>&1 | grep -i database\n\n"
+                            f"After identifying the env/service/config issue:\n"
+                            f"  - fix /etc/karios/secrets.env or systemd unit\n"
+                            f"  - systemctl daemon-reload && systemctl restart karios-migration\n"
+                            f"  - verify with: curl -sI http://localhost:8089/api/v1/healthz\n"
+                            f"  - confirm with: agent send orchestrator '[INFRA-FIXED] {gap_id} iteration {next_iter}'\n"
+                            f"DO NOT touch Go code. ONLY fix infra/env/service config."
+                        )
                     print(f"[dispatcher] v7.23.2 INFRA-FIX routing for {gap_id} iter {next_iter} (category={_v7232_cat}) — devops, not backend")
                     # v7.24-5: fresh trace per INFRA-FIX too
                     _v724_5_infra_tid = new_trace_id(gap_id, "orchestrator", f"infra_iter{next_iter}")
@@ -3048,7 +3077,7 @@ def verify_gitea_push(gap_id: str, repos: list) -> tuple[bool, str]:
     return True, "all repos up-to-date with origin"
 
 
-def handle_production_deployed(gap_id: str, trace_id: str = None):
+def handle_production_deployed(gap_id: str, body: str = "", trace_id: str = None):
     """Production deployment complete — with Gitea push gate (Item D)."""
     tid = trace_id or new_trace_id(gap_id, "devops", "prod_deployed")
 
@@ -3122,8 +3151,18 @@ def handle_requirement(message_body: str, trace_id: str = None):
     tid = trace_id or new_trace_id(op="new_requirement")
     state = load_state()
     req_count = len(state.get("completed_gaps", [])) + len(state.get("active_gaps", {})) + 1
-    req_id = f"REQ-{req_count:03d}"
     gap_id = f"ARCH-IT-{req_count:03d}"
+    req_id = f"REQ-{req_count:03d}"
+    # v7.115-A: skip IDs that are already taken (avoids recycling completed gaps)
+    # v7.116-A-ext: also block IDs in completed_gaps (a completed ID can be recycled
+    # if the gap moved out of active_gaps before v7.115-A was introduced).
+    _cg_raw = state.get("completed_gaps", [])
+    _completed_ids = set(x if isinstance(x, str) else x.get("gap_id", "") for x in _cg_raw)
+    all_used = set(state.get("active_gaps", {}).keys()) | _completed_ids
+    while gap_id in all_used:
+        req_count += 1
+        gap_id = f"ARCH-IT-{req_count:03d}"
+        req_id = f"REQ-{req_count:03d}"
 
     req_file = REQS_DIR / f"{req_id}.md"
     req_file.write_text(f"# Requirement: {req_id}\n\n{message_body}\n\n_Received: {current_ts()} (trace={tid})_\n")
@@ -3547,7 +3586,7 @@ def progress_probe_check():
         for gap_id, ge in ag.items():
             if not _GAP_ID_RE.match(gap_id or ""):  # v7.103-A: reject invalid gap_ids before any processing
                 continue
-            if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792"):  # v7.97 H1: include v792 sentinel
+            if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792", "paused"):  # v7.97 H1: include v792 sentinel; v7.116-E: paused gaps must also be skipped
                 continue
             # v7.8.1: phase lives in gap metadata file, not active_gaps entry. Use load_gap.
             gdata = load_gap(gap_id) or {}
@@ -3559,9 +3598,13 @@ def progress_probe_check():
             ps = _PROGRESS_PROBE_STATE.setdefault(gap_id, {"last_check_ts": now, "last_size": cur_size, "stale_count": 0})
             elapsed = now - ps["last_check_ts"]
             # v7.61: phase-specific stall timeout — 4-testing/4-production need >30 min
+            # v7.116-C: extend coding stall window — complex features (7+ pkgs,
+            # 5+ endpoints, WebSocket) need >16 min; raise to 20 min per stall,
+            # so kill fires at 2*20=40 min instead of 2*8=16 min.
             _phase_stall_secs = {
                 "4-testing": 1800, "phase-4-testing": 1800,
                 "4-production": 1800, "phase-4-production": 1800,
+                "3-coding": 1200, "phase-3-coding": 1200,
             }.get(phase, PROGRESS_STALL_SECS)
             if elapsed < _phase_stall_secs:
                 continue  # not yet time to re-evaluate
@@ -3621,7 +3664,7 @@ def progress_probe_check():
                         # v7.91.3: orphan-detector pre-clears stale idem so re-dispatch can SETNX; root cause is ghost-drop from gap_id mutation bug
                         _subject = None
                         if _phase_norm in ("3-coding", "3-coding-sync"):
-                            _subject = f"[FAN-OUT] gap={gap_id} [CODE-REQUEST] {gap_id}"
+                            _subject = f"[FAN-OUT] [CODE-REQUEST] {gap_id} {gap_id}"
                         elif _phase_norm in ("1-research", "2-arch-loop", "2-architecture"):
                             _subject = f"[ARCHITECT] {gap_id}"
                         elif _phase_norm in ("4-testing",):
@@ -4497,19 +4540,43 @@ def parse_message(msg_id: str, data: dict):
                     _g85["noop_agents"] = _noop_list_85
                     save_gap(gid, _g85)
                 print(f"[dispatcher] v7.85: persisted {_noop_canonical_85} as noop_agent for {gid}")
-            if crg_calls == 0 and not has_real_commit and not _is_scope_noop:
+            # v7.115-C: frontend NO-OP is valid when frontend is in gap's noop_agents list
+            _sender_is_declared_noop = (
+                sender in ("frontend", "frontend-worker") and
+                "frontend" in gap_data.get("noop_agents", [])
+            )
+            if crg_calls == 0 and not has_real_commit and not _is_scope_noop and not _sender_is_declared_noop:
                 # No proof of work → refuse + retry (orig v7.6 behavior)
                 print(f"[dispatcher] CODING-COMPLETE refused: {sender} had 0 code_review_graph calls AND no commit")
+                # v7.110-B: mirror v7.92 — escalate after 3 empty CODING-COMPLETEs in 1hr
+                _v7110b_ctr_key = f"v7110:rejects:coding:{gid}"
+                try:
+                    _v7110b_r = redis_conn()
+                    _v7110b_count = _v7110b_r.incr(_v7110b_ctr_key)
+                    _v7110b_r.expire(_v7110b_ctr_key, 3600)
+                except Exception:
+                    _v7110b_count = 1
+                if _v7110b_count > 3:
+                    print(f"[dispatcher] v7.110-B ESCALATE {gid} — {_v7110b_count} empty [CODING-COMPLETE] from {sender} in <1hr")
+                    try:
+                        escalate_to_human(gid,
+                            f"Backend/frontend sent {_v7110b_count} empty [CODING-COMPLETE] signals in <1hr",
+                            f"Sender: {sender}. No commit_sha and no code_review_graph calls on each. "
+                            f"Likely agent routing bug. Gap: {gid}.",
+                            rating=0, iteration=iteration)
+                    except Exception as _v7110b_ee:
+                        print(f"[dispatcher] v7.110-B escalate failed: {_v7110b_ee}")
+                    return
                 stream_publish(
                     subject=f"[CODING-RETRY] {gid}",
                     body=json.dumps({
-                        "reason": "code_review_graph_calls=0 + no commit — retry with get_minimal_context + ship code",
+                        "reason": f"code_review_graph_calls=0 + no commit — retry (v7.110-B reject #{_v7110b_count}/3)",
                         "gap_id": gid, "iteration": iteration
                     }),
                     from_agent="orchestrator",
                     gap_id=gid, priority="high"
                 )
-                telegram_alert(f"🚨 {gid}: CODING-COMPLETE refused — {sender} skipped graph + no commit. Retry required.")
+                telegram_alert(f"🚨 {gid}: CODING-COMPLETE refused — {sender} skipped graph + no commit (v7.110-B reject #{_v7110b_count}/3).")
                 return
             elif crg_calls == 0 and has_real_commit:
                 # Real commit shipped, just skipped graph — warn but advance
@@ -4577,6 +4644,8 @@ def parse_message(msg_id: str, data: dict):
                               sync_body, gap_id=gid, trace_id=tid, priority="high")
             publish_gap_event("gap.iteration", gid,
                               {"action": "fan_in_api_sync_triggered", "gap_id": gid, "trace_id": tid})
+            # A1: mark gap as 3-coding-sync so PHASE_TIMEOUT detects API-SYNC stall
+            update_gap_phase(gid, "3-coding-sync", trace_id=tid)
         return
 
     # ── API sync confirmation ─────────────────────────────────────────────
@@ -4693,6 +4762,19 @@ def parse_message(msg_id: str, data: dict):
                     pass
                 _v724_7_tid = new_trace_id(_v724_7_gid, "orchestrator", f"reretest_iter{_v724_7_iter}")
                 print(f"[dispatcher] v7.24-7 [INFRA-FIXED] {_v724_7_gid} — re-dispatching E2E-REVIEW + TEST-RUN to testers")
+                # v7.110-A: idempotency — drop duplicate [INFRA-FIXED] within 1h (3600s)
+                _v7110a_idem_key = f"infra_fixed:{_v724_7_gid}:{_v724_7_iter}"
+                try:
+                    _v7110a_r = redis_conn()
+                    if _v7110a_r.exists(_v7110a_idem_key):
+                        print(f"[dispatcher] v7.110-A DROP duplicate [INFRA-FIXED] {_v724_7_gid} iter {_v724_7_iter}")
+                        return
+                    _v7110a_r.setex(_v7110a_idem_key, 3600, "1")  # A3: extended 120s->3600s (1h) to deduplicate duplicate INFRA-FIXED within 1 hour
+                except Exception as _v7110a_e:
+                    # v7.114: fail-CLOSED — Redis unavailable means we cannot confirm uniqueness,
+                    # so reject this signal to prevent a duplicate E2E-REVIEW being dispatched.
+                    print(f"[dispatcher] v7.110-A idem check failed (failing CLOSED): {_v7110a_e}")
+                    return
                 # Use existing prompt builder if available
                 if _PROMPT_BUILDER:
                     _v724_7_e2e_body = _build_prompt(task_type="E2E-REVIEW", gap_id=_v724_7_gid,
@@ -4782,6 +4864,18 @@ def parse_message(msg_id: str, data: dict):
             iteration = int(_iter_token.rstrip(':')) if _iter_token else 1
         except (ValueError, AttributeError):
             iteration = 1
+        # v7.116-D: guard against tester sending stale subject iteration
+        # (e.g. "[TEST-RESULTS] FAN-OUT iteration 1" when state is at iter 3).
+        # If state.json shows a higher iteration for this gap, use that value
+        # so routing does not rewind the gap to an earlier revision cycle.
+        try:
+            _v7116d_st = json.loads(Path("/var/lib/karios/orchestrator/state.json").read_text())
+            _v7116d_iter = _v7116d_st.get("active_gaps", {}).get(gid, {}).get("iteration", 0)
+            if isinstance(_v7116d_iter, int) and _v7116d_iter > iteration:
+                print(f"[dispatcher] v7.116-D: subject iter={iteration} < state iter={_v7116d_iter} for {gid} — using state iter")
+                iteration = _v7116d_iter
+        except Exception as _v7116d_e:
+            print(f"[dispatcher] v7.116-D iter-sync check failed (non-fatal): {_v7116d_e}")
         try:
             # v7.5.3: extract JSON from prose+fence body (same fix as handle_arch_review)
             _b = body.strip()
@@ -4950,7 +5044,7 @@ def parse_message(msg_id: str, data: dict):
         # v7.74: use whitespace split — colon in body was grabbing description into gid
         _pd_rest = subject.split("]")[1].strip() if "]" in subject else subject
         gid = _pd_rest.split()[0] if _pd_rest else ""
-        handle_production_deployed(gid, trace_id=trace_id)
+        handle_production_deployed(gid, body=body, trace_id=trace_id)
         return
 
     # ── Escalation ────────────────────────────────────────────────────────
@@ -5041,6 +5135,10 @@ def check_stalled_gaps():
         "2-arch-loop": 15 * 60,
         "3-coding": 30 * 60,
         "3-coding-testing": 20 * 60,
+        # A1: API-SYNC fan-in waiting state — escalate if either backend or frontend silent >30 min
+        "3-coding-sync": int(os.environ.get("KARIOS_API_SYNC_TIMEOUT", str(30 * 60))),
+        # A2: STAGING-DEPLOYED waiting state — escalate if devops never confirms >30 min
+        "3-deploy": int(os.environ.get("KARIOS_STAGING_TIMEOUT", str(30 * 60))),
     }
     stalled = []
     for gid, ge in state.get("active_gaps", {}).items():
@@ -5048,7 +5146,7 @@ def check_stalled_gaps():
             continue
         # v7.8: skip gaps marked completed/closed/cancelled in state.json — dispatcher should NOT
         # nudge them. ARCH-IT-016 cost ~9 hours of telegram noise because this filter was missing.
-        if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792"):  # v7.97 H1: include v792 sentinel
+        if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792", "paused"):  # v7.97 H1: include v792 sentinel; v7.116-E2: paused must not be nudged
             continue
         g = load_gap(gid)
         phase = g.get("phase", "")
@@ -5087,7 +5185,7 @@ def recover_from_checkpoints(active_gaps: dict):
 
         # v7.5: also skip if state.json says the gap is completed/closed
         ag_entry = active_gaps.get(gap_id, {})
-        if ag_entry.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792"):  # v7.97 H1: include v792 sentinel
+        if ag_entry.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792", "paused"):  # v7.97 H1: include v792 sentinel; v7.116-E2: paused gaps must not be recovered
             print(f"[dispatcher] Skipping recover for {gap_id}: state={ag_entry.get('state')}")
             continue
         if ag_entry.get("phase") in ("completed", "closed"):
@@ -5279,6 +5377,14 @@ def main():
     last_read_id = None  # FIX v5.1: track last ID to avoid re-processing messages
 
     while True:
+        # R-1.2 (structural-audit 2026-04-24): operator pause lock.
+        # When /var/lib/karios/PIPELINE_PAUSED exists, skip this cycle without
+        # consuming from Redis. Operator clears by removing the file. Service
+        # stays up; heartbeat thread continues. Zero effect when file absent.
+        if os.path.exists("/var/lib/karios/PIPELINE_PAUSED"):
+            time.sleep(5)
+            continue
+
         # FIX v5.1: XREAD with last-read ID tracking — no consumer group needed.
         # Returns (messages, last_id) so we never re-read the same messages.
         # CRITICAL: Use short timeout (1000ms) so the loop cycles fast enough to
@@ -5324,6 +5430,94 @@ def main():
             # Telegram only every 3rd nudge to avoid spam
             if nudge_count == 0:
                 telegram_alert(f"STALLED: {gid} in {phase} (iter {iteration}) for {age_min}min. Nudge {nudge_count+1}. Backoff={backoff_seconds}s.")
+            # A1: API-SYNC fan-in timeout — escalate after 30 min if one side silent
+            if phase in ("3-coding-sync",):
+                _timeout_min = int(os.environ.get("KARIOS_API_SYNC_TIMEOUT", str(30 * 60))) // 60
+                if age_min >= _timeout_min:
+                    print(f"[dispatcher] A1 API-SYNC-TIMEOUT {gid} — {age_min}min in {phase}, escalating")
+                    try:
+                        telegram_alert(f"⚠️ *{gid}*: API-SYNC fan-in TIMEOUT ({age_min}min >= {_timeout_min}min). One agent may be permanently silent. Escalating.")
+                    except Exception:
+                        pass
+                    try:
+                        stream_publish(
+                            subject=f"[ESCALATE] {gid} reason=api_sync_timeout_{_timeout_min}min",
+                            body=f"API-SYNC fan-in timed out after {age_min} minutes for {gid} iter={iteration}. One or both of backend/frontend did not confirm. Needs human intervention.",
+                            from_agent="orchestrator",
+                            gap_id=gid,
+                            trace_id=tid,
+                        )
+                    except Exception as _a1_e:
+                        print(f"[dispatcher] A1 escalate stream failed: {_a1_e}")
+                    try:
+                        escalate_to_human(gid, f"API-SYNC fan-in timed out after {_timeout_min}min",
+                                          f"Gap {gid} has been in API-SYNC waiting state for {age_min} minutes. " 
+                                          f"One or both of backend/frontend did not confirm API alignment. ",
+                                          rating=0, iteration=iteration)
+                    except Exception as _a1_esc_e:
+                        print(f"[dispatcher] A1 escalate_to_human failed: {_a1_esc_e}")
+                    gap["nudge_count"] = nudge_count + 1
+                    gap["last_nudge_ts"] = now_ts.isoformat()
+                    save_gap(gid, gap)
+                    continue
+            # A2: STAGING-DEPLOYED timeout — escalate after 30 min if devops never confirms
+            if phase in ("3-deploy",):
+                _staging_timeout_min = int(os.environ.get("KARIOS_STAGING_TIMEOUT", str(30 * 60))) // 60
+                if age_min >= _staging_timeout_min:
+                    print(f"[dispatcher] A2 STAGING-DEPLOYED-TIMEOUT {gid} — {age_min}min in {phase}, escalating")
+                    try:
+                        telegram_alert(f"⚠️ *{gid}*: STAGING-DEPLOYED TIMEOUT ({age_min}min >= {_staging_timeout_min}min). DevOps may not have confirmed staging. Escalating.")
+                    except Exception:
+                        pass
+                    try:
+                        stream_publish(
+                            subject=f"[ESCALATE] {gid} reason=staging_deployed_timeout_{_staging_timeout_min}min",
+                            body=f"STAGING-DEPLOYED wait timed out after {age_min} minutes for {gid} iter={iteration}. DevOps did not confirm staging deployment.",
+                            from_agent="orchestrator",
+                            gap_id=gid,
+                            trace_id=tid,
+                        )
+                    except Exception as _a2_e:
+                        print(f"[dispatcher] A2 escalate stream failed: {_a2_e}")
+                    try:
+                        escalate_to_human(gid, f"STAGING-DEPLOYED wait timed out after {_staging_timeout_min}min",
+                                          f"Gap {gid} has been in staging-deploy waiting state for {age_min} minutes. "
+                                          f"DevOps has not sent [STAGING-DEPLOYED] confirmation.",
+                                          rating=0, iteration=iteration)
+                    except Exception as _a2_esc_e:
+                        print(f"[dispatcher] A2 escalate_to_human failed: {_a2_esc_e}")
+                    gap["nudge_count"] = nudge_count + 1
+                    gap["last_nudge_ts"] = now_ts.isoformat()
+                    save_gap(gid, gap)
+                    continue
+            # v7.115-B: also escalate None-assigned gaps that exceed nudge cap
+            _nudge_assigned = assigned if assigned in ["architect", "backend", "frontend", "devops", "tester"] else "orchestrator"
+            _v7115b_nudge_cap = 10
+            if assigned not in ["architect", "backend", "frontend", "devops", "tester"] and nudge_count >= _v7115b_nudge_cap:
+                print(f"[dispatcher] v7.115-B NUDGE-CAP-ESCALATE {gid} — unassigned gap, {nudge_count} nudges in phase={phase}")
+                try:
+                    telegram_alert(f"⚠️ *{gid}*: NUDGE CAP REACHED ({nudge_count} nudges, unassigned). Escalating to human.")
+                except Exception:
+                    pass
+                try:
+                    escalate_to_human(gid, f"Nudge cap reached in phase {phase} (unassigned gap)",
+                                      f"Gap {gid} assigned_agent={assigned!r} has been nudged {nudge_count} times "
+                                      f"in phase {phase} (iter {iteration}) with no progress. "
+                                      f"Stalled for {age_min} minutes. Needs human diagnosis.",
+                                      rating=0, iteration=iteration)
+                except Exception as _v7115b_e:
+                    print(f"[dispatcher] v7.115-B escalate failed: {_v7115b_e}")
+                try:
+                    _v7115b_state = load_state()
+                    _v7115b_state.setdefault("active_gaps", {}).setdefault(gid, {})["state"] = "escalated"
+                    _v7115b_state["active_gaps"][gid]["escalation_reason"] = f"Nudge cap ({_v7115b_nudge_cap}) reached (unassigned) in phase {phase}"
+                    save_state(_v7115b_state)
+                except Exception as _v7115b_se:
+                    print(f"[dispatcher] v7.115-B state update failed: {_v7115b_se}")
+                gap["nudge_count"] = nudge_count + 1
+                gap["last_nudge_ts"] = now_ts.isoformat()
+                save_gap(gid, gap)
+                continue  # stop nudging this gap
             if assigned in ["architect", "backend", "frontend", "devops", "tester"]:
                 # v7.99-B: if backend committed but phase stuck at 3-coding, the blocker is
                 # test-results schema — try schema-repair re-emit instead of nudging backend
@@ -5356,6 +5550,33 @@ def main():
                             print(f"[dispatcher] v7.99-B schema-repair failed, falling back to nudge: {_v799_b_e}")
                     else:
                         print(f"[dispatcher] v7.99-B: backend committed for {gid} but no test-results.json at {_v799_tr_path} — falling back to nudge")
+                # v7.112-B: NUDGE CAP — after 10 nudges with no progress, escalate + mark dormant
+                _v7112b_nudge_cap = 10
+                if nudge_count >= _v7112b_nudge_cap:
+                    print(f"[dispatcher] v7.112-B NUDGE-CAP-ESCALATE {gid} — {nudge_count} nudges sent with no progress in phase={phase}")
+                    try:
+                        telegram_alert(f"⚠️ *{gid}*: NUDGE CAP REACHED ({nudge_count} nudges in {phase}). Escalating to human — gap may be stuck.")
+                    except Exception:
+                        pass
+                    try:
+                        escalate_to_human(gid, f"Nudge cap reached in phase {phase}",
+                                          f"Gap {gid} has been nudged {nudge_count} times in phase {phase} (iter {iteration}) with no progress. "
+                                          f"Stalled for {age_min} minutes. Needs human diagnosis.",
+                                          rating=0, iteration=iteration)
+                    except Exception as _v7112b_e:
+                        print(f"[dispatcher] v7.112-B escalate failed: {_v7112b_e}")
+                    # Mark gap as dormant so check_stalled_gaps stops nudging
+                    try:
+                        _v7112b_state = load_state()
+                        _v7112b_state.setdefault("active_gaps", {}).setdefault(gid, {})["state"] = "escalated"
+                        _v7112b_state["active_gaps"][gid]["escalation_reason"] = f"Nudge cap ({_v7112b_nudge_cap}) reached in phase {phase}"
+                        save_state(_v7112b_state)
+                    except Exception as _v7112b_se:
+                        print(f"[dispatcher] v7.112-B state update failed: {_v7112b_se}")
+                    gap["nudge_count"] = nudge_count + 1
+                    gap["last_nudge_ts"] = now_ts.isoformat()
+                    save_gap(gid, gap)
+                    continue  # stop nudging this gap
                 send_to_agent(assigned,
                               f"[NUDGE] {gid} — stalled in {phase}",
                               f"Your gap {gid} has been in phase {phase} (iteration {iteration}) for {age_min} minutes. "
