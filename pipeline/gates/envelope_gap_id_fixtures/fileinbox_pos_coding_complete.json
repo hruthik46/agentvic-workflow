@@ -1,0 +1,10 @@
+{
+  "description": "CODING-COMPLETE subject from agent-msg: no envelope, subject token[1] is canonical gap_id; promoted to envelope.",
+  "input": {
+    "subject": "[CODING-COMPLETE] ARCH-IT-070 commit_sha=abc123 branch=backend/x",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-070"
+  }
+}

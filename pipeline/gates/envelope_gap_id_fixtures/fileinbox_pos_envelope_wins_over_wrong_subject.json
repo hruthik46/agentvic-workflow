@@ -1,0 +1,10 @@
+{
+  "description": "Envelope holds canonical gap_id; subject embeds a different one. Promoter keeps envelope (v7.81b honor re-inject).",
+  "input": {
+    "subject": "[CODING-COMPLETE] WRONG-GID iteration 1",
+    "data": {"gap_id": "ARCH-IT-055"}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-055"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "description": "API-SYNC subject uses em-dash delimiter after the gap_id; extraction takes token[1] only, so em-dash prose does not bleed.",
+  "input": {
+    "subject": "[API-SYNC] ARCH-IT-077 — ALIGNED. Backend confirms API contract.",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-077"
+  }
+}

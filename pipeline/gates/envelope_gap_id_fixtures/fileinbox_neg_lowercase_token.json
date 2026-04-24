@@ -1,0 +1,10 @@
+{
+  "description": "Subject token[1] is lowercase; _GAP_ID_RE's uppercase prefix requirement rejects it. Envelope stays None — conservative behavior preserves existing downstream guards for malformed ids.",
+  "input": {
+    "subject": "[FAN-IN] arch-it-001 iteration 1",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": null
+  }
+}

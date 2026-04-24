@@ -1,0 +1,10 @@
+{
+  "description": "Plain-text subject with no [TAG] prefix; no subject promotion and envelope absent, so envelope_gap_id stays None.",
+  "input": {
+    "subject": "plain text no tag",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": null
+  }
+}

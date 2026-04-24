@@ -303,12 +303,29 @@ def _file_inbox_fallback() -> list:
                     _gap = _toks[1] if len(_toks) > 1 else ""
                     _itn = int(_toks[-1]) if len(_toks) > 1 and _toks[-1].isdigit() else 1
                     body = body + "\n" + json.dumps({"gap_id": _gap, "iteration": _itn})
+                # R-3 Theme 1 session #4: envelope-first gap_id for file-inbox
+                # packets. agent-msg does not yet carry gap_id in the packet
+                # contract, so envelope arrives None for the primary file-inbox
+                # channel. Promote subject token[1] when it validates as a
+                # canonical gap_id; when envelope is valid, keep it verbatim.
+                # Unblocks Theme 1 handler-level retirements downstream.
+                # R-3-GATE: file-inbox-envelope-promote-begin
+                envelope_gap_id = data.get("gap_id") or None
+                if not (envelope_gap_id and _GAP_ID_RE.match(envelope_gap_id)):
+                    envelope_gap_id = None
+                    if subject.startswith("["):
+                        _etoks = subject.split()
+                        if len(_etoks) >= 2:
+                            _cand = _etoks[1].rstrip(":,")
+                            if _GAP_ID_RE.match(_cand):
+                                envelope_gap_id = _cand
+                # R-3-GATE: file-inbox-envelope-promote-end
                 # Convert agent-msg format to orchestrator stream format
                 wrapped = {
                     "from": data.get("from", "unknown"),
                     "subject": subject,
                     "body": body,
-                    "gap_id": data.get("gap_id") or None,  # v7.81b: honor gap_id from v7.65 re-inject packets
+                    "gap_id": envelope_gap_id,  # v7.81b + R-3 s4: envelope-first (honors re-inject, promotes subject token for agent-msg)
                     "trace_id": None,
                     "timestamp": data.get("created_at", current_ts()),
                     "_packet_id": data.get("id"),

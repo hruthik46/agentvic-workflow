@@ -1,0 +1,10 @@
+{
+  "description": "Envelope has junk 'none' string; sanitizer-equivalent regex mismatch drops it and subject token is promoted.",
+  "input": {
+    "subject": "[CODING-COMPLETE] ARCH-IT-070 iteration 1",
+    "data": {"gap_id": "none"}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-070"
+  }
+}

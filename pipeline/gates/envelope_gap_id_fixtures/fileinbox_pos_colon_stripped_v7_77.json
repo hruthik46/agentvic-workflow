@@ -1,0 +1,10 @@
+{
+  "description": "FAN-IN subject sometimes has trailing colon on the gap_id token; promoter strips colon before regex match (covers v7.77 motivation via envelope rather than handler prose-parse).",
+  "input": {
+    "subject": "[FAN-IN] ARCH-IT-012: iteration 3",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": "ARCH-IT-012"
+  }
+}

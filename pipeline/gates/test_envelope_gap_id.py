@@ -146,6 +146,77 @@ def extract_handler_resolver(source_path):
     )
 
 
+FILEINBOX_BEGIN_MARKER = 'R-3-GATE: file-inbox-envelope-promote-begin'
+FILEINBOX_END_MARKER = 'R-3-GATE: file-inbox-envelope-promote-end'
+
+
+def extract_fileinbox_promoter(source_path):
+    """Extract the _file_inbox_fallback envelope-promotion block delimited by
+    R-3-GATE markers and return Python source for a callable
+    _fileinbox_promote(subject, data, _GAP_ID_RE) -> envelope_gap_id.
+    The block is at 16-space indent inside _file_inbox_fallback (nested in
+    try/for/try); dedent 16 to 4 so it runs inside our wrapper function."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if FILEINBOX_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif FILEINBOX_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE file-inbox markers not found in dispatcher')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('                '):  # 16 spaces
+            dedented.append('    ' + ln[16:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError(f'unexpected indent in file-inbox block: {ln!r}')
+    return (
+        'def _fileinbox_promote(subject, data, _GAP_ID_RE):\n'
+        + '\n'.join(dedented)
+        + '\n    return envelope_gap_id\n'
+    )
+
+
+def run_fileinbox_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run fileinbox_*.json fixtures through the extracted promoter.
+    Each fixture's input has subject + data (packet dict); expected has
+    envelope_gap_id."""
+    import tempfile, runpy
+    wrapper_src = extract_fileinbox_promoter(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        os.unlink(tf_path)
+    promoter = ns['_fileinbox_promote']
+
+    passes, fails = 0, 0
+    for fname in sorted(os.listdir(fixtures_dir)):
+        if not (fname.startswith('fileinbox_') and fname.endswith('.json')):
+            continue
+        fpath = os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        got = promoter(inp.get('subject', ''), inp.get('data', {}), gap_re)
+        if got == expected.get('envelope_gap_id'):
+            print(f'  OK   {fname} ({fixture.get("description", "")[:50]}) -> envelope_gap_id={got!r}')
+            passes += 1
+        else:
+            print(f'  FAIL {fname}: envelope_gap_id: got {got!r}, expected {expected.get("envelope_gap_id")!r}')
+            fails += 1
+    return passes, fails
+
+
 def run_handler_fixtures(fixtures_dir, gap_re, dispatcher_path):
     """Run handler_*.json fixtures through the extracted handler resolver.
     Each fixture's input has subject/body/gap_id; expected has gid. Loads the
@@ -212,8 +283,8 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith('handler_'):
-            continue  # handler-path fixtures run via extract_handler_resolver below
+        if fname.startswith(('handler_', 'fileinbox_')):
+            continue  # handler-path + file-inbox fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
             fixture = json.load(f)
@@ -247,6 +318,15 @@ def main():
     h_pass, h_fail = run_handler_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += h_pass
     fails += h_fail
+
+    # R-3 Theme 1 session #4 coverage: file-inbox envelope promotion.
+    # Exercises the envelope-promote block (inside _file_inbox_fallback, gated
+    # by R-3-GATE markers) against fileinbox_*.json fixtures. Backs every
+    # retirement whose handler is reachable via the agent-msg file-inbox path,
+    # now that file-inbox supplies canonical envelope gap_id.
+    fi_pass, fi_fail = run_fileinbox_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += fi_pass
+    fails += fi_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

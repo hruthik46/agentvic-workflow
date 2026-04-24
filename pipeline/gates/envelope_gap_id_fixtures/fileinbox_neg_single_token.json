@@ -1,0 +1,10 @@
+{
+  "description": "Subject has the bracketed tag only (agent forgot the gap_id). len(_etoks) < 2 guard trips, no token extraction attempted.",
+  "input": {
+    "subject": "[STAGING-DEPLOYED]",
+    "data": {}
+  },
+  "expected": {
+    "envelope_gap_id": null
+  }
+}
