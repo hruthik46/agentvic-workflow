@@ -1,0 +1,11 @@
+{
+  "description": "Envelope holds canonical gap_id; subject embeds a different (wrong) one. Handler must use envelope.",
+  "input": {
+    "subject": "[CODING-COMPLETE] WRONG-GID iteration 1",
+    "body": "",
+    "gap_id": "ARCH-IT-070"
+  },
+  "expected": {
+    "gid": "ARCH-IT-070"
+  }
+}

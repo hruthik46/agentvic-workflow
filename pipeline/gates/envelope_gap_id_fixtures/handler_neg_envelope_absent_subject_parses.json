@@ -1,0 +1,11 @@
+{
+  "description": "Envelope absent (file-inbox path). Subject prose-parse fallback must still return correct gid.",
+  "input": {
+    "subject": "[CODING-COMPLETE] ARCH-IT-070 iteration 1",
+    "body": "",
+    "gap_id": null
+  },
+  "expected": {
+    "gid": "ARCH-IT-070"
+  }
+}

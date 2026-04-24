@@ -4461,22 +4461,31 @@ def parse_message(msg_id: str, data: dict):
         print(f"[dispatcher] DROP: [CODING-COMPLETE] from {sender} — wrong sender (only backend/frontend may emit). Should be [E2E-RESULTS].")
         return
     if subject.startswith("[CODING-COMPLETE]") or subject.startswith("[FAN-IN]"):
+        # R-3 envelope-first (session #3, 2026-04-24): prefer envelope gap_id over
+        # subject prose when envelope is valid. Subject-parse fallback stays reachable
+        # via the file-inbox path (`agent send` -> _file_inbox_fallback) which does
+        # NOT propagate envelope gap_id; closing that gap is session #4 work.
+        # R-3-GATE: handler-gid-resolve-begin
         remaining = subject.split("]")[1].strip() if "]" in subject else subject
         tokens = remaining.split()
-        # v6.0 FIX 2026-04-19: tokens[0] could be "gap_id=ARCH-IT-X" or "ARCH-IT-X"
-        # depending on agent format. Normalize by stripping known prefixes.
-        gid_raw = tokens[0] if tokens else ""
-        for prefix in ("gap_id=", "gap=", "id=", "trace_id="):
-            if gid_raw.startswith(prefix):
-                gid_raw = gid_raw[len(prefix):]
-                break
-        gid_raw = gid_raw.rstrip(":")  # v7.77: strip trailing colon from [FAN-IN] ARCH-IT-070: body
-        gid = gid_raw
-        # Also try regex on body in case subject was wholly different
-        import re as _re
-        bm = _re.search(r"gap_id[=:\s]+(\S+)", body)
-        if bm and (not gid or "=" in gid):
-            gid = bm.group(1).strip()
+        if gap_id and _GAP_ID_RE.match(gap_id):
+            gid = gap_id
+        else:
+            # v6.0 FIX 2026-04-19: tokens[0] could be "gap_id=ARCH-IT-X" or "ARCH-IT-X"
+            # depending on agent format. Normalize by stripping known prefixes.
+            gid_raw = tokens[0] if tokens else ""
+            for prefix in ("gap_id=", "gap=", "id=", "trace_id="):
+                if gid_raw.startswith(prefix):
+                    gid_raw = gid_raw[len(prefix):]
+                    break
+            gid_raw = gid_raw.rstrip(":")  # v7.77: strip trailing colon from [FAN-IN] ARCH-IT-070: body
+            gid = gid_raw
+            # Also try regex on body in case subject was wholly different
+            import re as _re
+            bm = _re.search(r"gap_id[=:\s]+(\S+)", body)
+            if bm and (not gid or "=" in gid):
+                gid = bm.group(1).strip()
+        # R-3-GATE: handler-gid-resolve-end
         # v7.74: reject unknown sender — HERMES_AGENT env var not set on agent
         if sender in ("unknown", "") or not sender:
             print(f"[dispatcher] v7.74 DROP [CODING-COMPLETE] from unknown sender for {gid} — HERMES_AGENT not set on agent")

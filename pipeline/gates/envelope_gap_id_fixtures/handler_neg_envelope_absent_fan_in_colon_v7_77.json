@@ -1,0 +1,11 @@
+{
+  "description": "Envelope absent + [FAN-IN] subject ending in colon. v7.77 colon-strip fallback must keep working (file-inbox path still hits this).",
+  "input": {
+    "subject": "[FAN-IN] ARCH-IT-070: continuing handoff",
+    "body": "",
+    "gap_id": null
+  },
+  "expected": {
+    "gid": "ARCH-IT-070"
+  }
+}

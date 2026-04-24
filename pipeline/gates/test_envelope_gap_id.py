@@ -109,6 +109,77 @@ def structural_gate(pm_node):
     return False, f'first gap_id assignment does NOT read data.get("gap_id") envelope: rhs={rhs_repr!r}'
 
 
+HANDLER_BEGIN_MARKER = 'R-3-GATE: handler-gid-resolve-begin'
+HANDLER_END_MARKER = 'R-3-GATE: handler-gid-resolve-end'
+
+
+def extract_handler_resolver(source_path):
+    """Extract the [CODING-COMPLETE]/[FAN-IN] handler's gid-resolution block from
+    the live dispatcher (delimited by R-3-GATE markers) and return Python source
+    for a callable `_handler_resolve(subject, body, gap_id, _GAP_ID_RE) -> gid`.
+    The block is at 8-space indent inside parse_message's handler; we dedent to
+    4 spaces so it sits inside our wrapper function."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if HANDLER_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif HANDLER_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('        '):
+            dedented.append('    ' + ln[8:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError(f'unexpected indent in handler block: {ln!r}')
+    return (
+        'def _handler_resolve(subject, body, gap_id, _GAP_ID_RE):\n'
+        + '\n'.join(dedented)
+        + '\n    return gid\n'
+    )
+
+
+def run_handler_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run handler_*.json fixtures through the extracted handler resolver.
+    Each fixture's input has subject/body/gap_id; expected has gid. Loads the
+    resolver via runpy.run_path so the helper lives in a real module namespace."""
+    import tempfile, runpy
+    wrapper_src = extract_handler_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        os.unlink(tf_path)
+    resolver = ns['_handler_resolve']
+
+    passes, fails = 0, 0
+    for fname in sorted(os.listdir(fixtures_dir)):
+        if not (fname.startswith('handler_') and fname.endswith('.json')):
+            continue
+        fpath = os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        got = resolver(inp.get('subject', ''), inp.get('body', ''), inp.get('gap_id'), gap_re)
+        if got == expected.get('gid'):
+            print(f'  OK   {fname} ({fixture.get("description", "")[:50]}) -> gid={got!r}')
+            passes += 1
+        else:
+            print(f'  FAIL {fname}: gid: got {got!r}, expected {expected.get("gid")!r}')
+            fails += 1
+    return passes, fails
+
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -141,6 +212,8 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
+        if fname.startswith('handler_'):
+            continue  # handler-path fixtures run via extract_handler_resolver below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
             fixture = json.load(f)
@@ -165,6 +238,15 @@ def main():
         else:
             print(f'  FAIL {fname}: {"; ".join(reasons)}')
             fails += 1
+
+    # ── R-3 handler-path coverage: [CODING-COMPLETE]/[FAN-IN] ─────────────
+    # Extracts the gid-resolution block delimited by R-3-GATE markers from the
+    # live dispatcher, wraps it as a callable, and runs handler_*.json fixtures
+    # through it. This backs per-handler retirements that the receive-head gate
+    # cannot back on its own (handlers each rebind gid from subject prose).
+    h_pass, h_fail = run_handler_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += h_pass
+    fails += h_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:
