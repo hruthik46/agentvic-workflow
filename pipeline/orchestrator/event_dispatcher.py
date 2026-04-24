@@ -3795,23 +3795,6 @@ def parse_message(msg_id: str, data: dict):
         print(f"[dispatcher] DROP empty subject from {sender} (trace={trace_id})")
         return
 
-    # v7.102-A: drop gap-specific messages when gap_id is invalid (e.g. "none", "null").
-    # Root cause of gap_id=none CBT loop: tester processes corrupted task, emits [TEST-RESULTS]
-    # with gap_id=none, dispatcher dispatches [E2E-REVIEW] none, CBT re-tests, infinite loop.
-    # _GAP_ID_RE matches ARCH-IT-NNN, TEST-FLOW-*, REQ-*; rejects "none", "null", bare strings.
-    _V7102A_GAP_SUBJECTS = (
-        "[TEST-RESULTS]", "[E2E-RESULTS]", "[ARCH-COMPLETE]", "[CODING-COMPLETE]",
-        "[FAN-IN]", "[PROD-DEPLOYED]", "[ARCH-REVIEWED]", "[RESEARCH-COMPLETE]",
-        "[E2E-REVIEW]", "[BLIND-E2E]", "[NUDGE]", "[COMPLETE]",
-        "[CODE-REVISE]", "[PRODUCTION]", "[ARCHITECT]", "[TEST-RUN]",
-        "[FAN-OUT]", "[CODE-REQUEST]",
-    )
-    if gap_id and not _GAP_ID_RE.match(gap_id):
-        if any(subject.startswith(_pfx) for _pfx in _V7102A_GAP_SUBJECTS):
-            print(f"[dispatcher] v7.102-A DROP {subject[:50]!r} from {sender}: "
-                  f"gap_id={gap_id!r} fails gap-id format (not a valid gap)")
-            return
-
     print(f"[dispatcher] ← {sender}: {subject} (trace={trace_id})")
 
     # v7.41 + v7.44: top-level terminal-state guard. Drop ANY message addressed to a gap
