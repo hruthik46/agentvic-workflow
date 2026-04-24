@@ -28,7 +28,7 @@ _local_bin = "/usr/local/bin"
 if _local_bin not in _sys.path:
     _sys.path.insert(0, _local_bin)
 
-import os, sys, json, subprocess, tempfile, time, threading, uuid, asyncio, pty, signal
+import os, sys, json, subprocess, tempfile, time, threading, uuid, asyncio, pty, signal, re
 from pathlib import Path
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +80,88 @@ except Exception as _v719_e:
 REDIS_HOST = os.environ.get("REDIS_HOST", "192.168.118.202")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 HERMES_CMD = os.environ.get("HERMES_CMD", "/root/.local/bin/hermes")
+
+# v7.91-P3 + P3.2 (F5): consume KAIROS_RAG_{ERROR,EVENT} sentinels from Hermes PTY stderr.
+# Publishes to Redis pubsub via a DEDICATED publisher thread + bounded queue —
+# the PTY reader MUST NOT block on Redis I/O. During Redis flap, sync publish
+# blocks the reader thread for socket_timeout (0.5s) each sentinel, backpressuring
+# the Hermes PTY and risking a no-output watchdog false-kill.
+RAG_EVENTS_CHANNEL = os.environ.get("KAIROS_RAG_EVENTS_CHANNEL", "kairos:rag:events")
+
+import queue as _rag_queue
+
+# Bounded queue; publisher thread drains. Overflow → put_nowait raises Full → drop silently.
+# 1024 buffer is ample for 9-agent fanout emitting ~5 sentinels per session.
+_RAG_Q: _rag_queue.Queue = _rag_queue.Queue(maxsize=1024)
+_RAG_PUBLISHER_THREAD_STARTED = [False]
+_RAG_PUBLISHER_LOCK_START = threading.Lock()
+
+
+def _rag_publisher_loop():
+    """Dedicated background thread — drains _RAG_Q and publishes to Redis.
+
+    Single Redis client, reconnects on failure. Drops payload silently on any
+    exception — observability loss is acceptable; PTY-reader-kill is not.
+    """
+    publisher = None
+    while True:
+        try:
+            payload = _RAG_Q.get()  # block
+        except Exception:
+            break
+        if payload is None:  # poison-pill shutdown signal (unused today)
+            break
+        try:
+            if publisher is None:
+                import redis as _redis
+                publisher = _redis.Redis(
+                    host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                    socket_connect_timeout=1.0, socket_timeout=1.0,
+                    health_check_interval=30,
+                )
+            publisher.publish(RAG_EVENTS_CHANNEL, json.dumps(payload))
+        except Exception:
+            publisher = None  # force reconnect on next try
+
+
+def _ensure_publisher_thread():
+    """Lazy-start the publisher thread on first sentinel."""
+    if _RAG_PUBLISHER_THREAD_STARTED[0]:
+        return
+    with _RAG_PUBLISHER_LOCK_START:
+        if _RAG_PUBLISHER_THREAD_STARTED[0]:
+            return
+        t = threading.Thread(target=_rag_publisher_loop, name="rag-publisher", daemon=True)
+        t.start()
+        _RAG_PUBLISHER_THREAD_STARTED[0] = True
+
+
+def _publish_rag_sentinel(line: str, trace_id, agent_name: str) -> None:
+    """Parse a KAIROS_RAG_{ERROR,EVENT} sentinel line, enqueue for Redis publish.
+
+    Runs on the PTY reader thread — MUST be non-blocking. Uses bounded queue with
+    put_nowait; drops silently on queue full (Redis flap).
+    """
+    try:
+        m = re.match(r"^KAIROS_RAG_(ERROR|EVENT)\s+(\{.*\})\s*$", line)
+        if not m:
+            return
+        try:
+            payload = json.loads(m.group(2))
+        except (json.JSONDecodeError, ValueError):
+            return
+        payload["_kind"] = m.group(1)
+        payload["_agent"] = agent_name
+        if trace_id:
+            payload["_trace_id"] = str(trace_id)[:80]
+        _ensure_publisher_thread()
+        try:
+            _RAG_Q.put_nowait(payload)
+        except _rag_queue.Full:
+            # Drop silently — observability loss is acceptable; PTY-reader-kill is not.
+            pass
+    except Exception:
+        pass
 
 # CheckpointService instance (initialized in main())
 checkpoint_service = None
@@ -481,161 +563,6 @@ def write_heartbeat():
         except Exception:
             pass
 
-# ── Hermes chat ────────────────────────────────────────────────────────────────
-def run_hermes(task: str, agent_name: str, gap_id: str = None,
-              trace_id: str = None, phase: str = None) -> str:
-    """Run Hermes CLI with task. Streams progress, saves checkpoints."""
-    tid = trace_id or new_trace_id("hermes_run")
-    profile = get_profile_name()  # Use PROFILE_MAP to get correct profile
-
-    # v4.0: Check for HITL interrupt before starting critical operations
-    if check_for_interrupt(gap_id):
-        print(f"[{AGENT}] HITL interrupt active for gap={gap_id}, waiting for clearance...")
-        status = wait_for_interrupt_clear(gap_id)
-        if status == 'rejected':
-            print(f"[{AGENT}] HITL rejected this task, returning early")
-            return f"ERROR: HITL rejected task for gap={gap_id}"
-        elif status == 'auto_approved':
-            print(f"[{AGENT}] HITL auto-approved (timeout), proceeding...")
-        else:
-            print(f"[{AGENT}] HITL approved, proceeding...")
-
-    # v4.0: Retrieve semantic memory suggestions before other learnings
-    semantic_suggestions = _get_semantic_learnings(gap_id or "", phase or "", AGENT)
-    if semantic_suggestions:
-        sem_ctx = "\n\n## Semantic Memory Suggestions\n"
-        for s in semantic_suggestions:
-            sem_ctx += f"- {s}\n"
-    else:
-        sem_ctx = ""
-
-    # Retrieve relevant learnings for context injection
-    learnings = retrieve_relevant_learnings(phase=phase, limit=5)
-    learnings_context = format_learnings_for_context(learnings)
-
-    # v7.2 — Pull cross-agent vault knowledge so this Hermes call has visibility
-    # of what the OTHER 8 agents have written (RCAs, decisions, fixes, learnings).
-    # Treats the vault as the source of truth across all 9 agents.
-    vault_ctx = ""
-    try:
-        sys.path.insert(0, "/usr/local/bin")
-        from obsidian_bridge import get_bridge as _get_obs_for_read
-        _ob_r = _get_obs_for_read()
-        # Search for entries relevant to this task/gap/agent
-        _q_terms = " ".join(filter(None, [gap_id or "", phase or "", AGENT, task[:200]]))
-        _hits = _ob_r.read_relevant(_q_terms, limit=8)
-        if _hits:
-            _lines = ["", "## Cross-Agent Vault Context (last-touched relevance, top 8)"]
-            for h in _hits:
-                _kind = h.get("kind", "?")
-                _path = h.get("path", "?").split("/raw/karios-pipeline/")[-1]
-                _snip = (h.get("snippet") or "").replace("\n", " ")[:160]
-                _lines.append(f"- [{_kind}] {_path} — ...{_snip}...")
-            vault_ctx = "\n".join(_lines)
-    except Exception as _vctx_e:
-        vault_ctx = f"\n## Cross-Agent Vault Context: (read failed — {type(_vctx_e).__name__})"
-
-    # v7.2 — Session-flush decision before invoking Hermes.
-    # Calls /usr/local/bin/karios-flush-decide which returns 0=continue, 1=flush, 2=summarize.
-    # Default behavior if helper missing or fails: continue (de-facto fresh subprocess).
-    _flush_action = "continue"
-    try:
-        _fd_proc = subprocess.run(
-            ["/usr/local/bin/karios-flush-decide", AGENT, gap_id or "no-gap"],
-            capture_output=True, text=True, timeout=5
-        )
-        if _fd_proc.returncode == 1:
-            _flush_action = "flush"
-        elif _fd_proc.returncode == 2:
-            _flush_action = "summarize"
-    except Exception:
-        pass
-    # If flushing OR summarizing, write a "session brief" to vault so context survives the flush.
-    if _flush_action in ("flush", "summarize"):
-        try:
-            sys.path.insert(0, "/usr/local/bin")
-            from obsidian_bridge import get_bridge as _get_obs_for_brief
-            _ob_b = _get_obs_for_brief()
-            _ob_b.write_memory(
-                agent=AGENT,
-                key=f"session_brief_pre_flush_{int(datetime.utcnow().timestamp())}",
-                value={
-                    "trace_id": tid, "gap_id": gap_id, "phase": phase,
-                    "task_excerpt": (task or "")[:500],
-                    "flush_action": _flush_action,
-                    "next_session_should_pick_up_from": (
-                        f"Last gap was {gap_id} in phase {phase}. See most recent critique/learning entries."
-                    ),
-                },
-                description=f"Pre-flush brief for {AGENT} so next session has continuity",
-            )
-            print(f"[{AGENT}] Pre-flush vault brief written (action={_flush_action})")
-        except Exception as _fb_e:
-            print(f"[{AGENT}] Pre-flush brief failed: {type(_fb_e).__name__}: {_fb_e}")
-
-    # Build context with trace_id for correlation
-    query = f"""You are the {agent_name} agent. Your role is defined in your profile at ~/.hermes/profiles/{profile}/SOUL.md and your coordination docs at /opt/obsidian/config/vaults/My-LLM-Wiki/wiki/agents/{agent_name}/index.md.
-
-TASK: {task}
-
-## Current Operation Trace
-trace_id: {tid}
-gap_id: {gap_id or 'none'}
-
-{learnings_context}
-{sem_ctx}
-{vault_ctx}
-
-Vault visibility — you can read what the OTHER 8 agents have written:
-  /usr/local/bin/karios-vault search "<keywords>"   # search across all kinds
-  /usr/local/bin/karios-vault recent --limit 10     # latest entries
-  /usr/local/bin/karios-vault recent --kind rca --limit 5
-You can write back so all 9 agents see your knowledge:
-  /usr/local/bin/karios-vault learning|critique|rca|bug|fix|decision|memory ...
-The vault at /opt/obsidian/config/vaults/My-LLM-Wiki/raw/karios-pipeline/ is the source of truth.
-
-## v7.13 — minimal injection (skill kairos-pipeline-operations has the rest)
-
-For code tasks: get_minimal_context(task="...") FIRST (saves 8-16x tokens). Then write_file.
-For git push: cd repo, git pull --rebase, git push. On conflict: karios-merge-resolve.
-NEVER push agentic-workflow files (blacklisted in .gitignore).
-
-When done: agent send orchestrator "<subject> <body or commit_sha>"
-
-Tools: terminal,file,web. Heartbeat: /usr/local/bin/agent-heartbeat {agent_name}.
-Full ops doc: read_file ~/.hermes/profiles/{agent_name}/SOUL.md if needed.
-Pipeline mechanics: hermes skill kairos-pipeline-operations.
-
-Start with a tool call. NO PROSE FIRST."""
-
-    stream_progress("task_started", f"{AGENT} starting task (trace={tid})",
-                   gap_id=gap_id, trace_id=tid, detail={"phase": phase})
-
-    try:
-        result = subprocess.run(
-            [HERMES_CMD, "chat",
-             "--profile", profile,
-             "--query", query,
-             "--toolsets", "terminal,file,web",
-             "-v"],
-                capture_output=True, text=True, timeout=1800,  # 30 min timeout for Phase 2 design
-            cwd="/root"
-        )
-        output = result.stdout + result.stderr
-
-        stream_progress("task_completed", f"{AGENT} completed task (trace={tid})",
-                       gap_id=gap_id, trace_id=tid, detail={"output_len": len(output)})
-        return output
-    except subprocess.TimeoutExpired:
-        err = f"ERROR: Hermes timed out after 600 seconds (trace={tid})"
-        stream_progress("task_timeout", err, gap_id=gap_id, trace_id=tid)
-        return err
-    except FileNotFoundError:
-        return f"ERROR: Hermes not found at {HERMES_CMD}"
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
 # ── Item E (ARCH-IT-ARCH-v11): Watchdog PTY Kill-on-No-Tool-Call ───────────────
 
 def stream_reader(master_fd: int, output_chunks: list, token_count: list,
@@ -643,12 +570,22 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                   kill_event: threading.Event,
                   hermes_pid_holder: list = None,
                   session_start_t: float = 0.0,
-                  no_output_kill_seconds: int = 300) -> None:
+                  no_output_kill_seconds: int = 300,
+                  stderr_tail: list = None,
+                  trace_id: str = None) -> None:
     """
     Background thread that reads PTY master fd, counts tokens, detects tool_use.
     Calls os.killpg(SIGTERM) if >4000 tokens with 0 tool_use events.
+
+    v7.91-P3: additionally parses KAIROS_RAG_{ERROR,EVENT} sentinel lines
+    emitted by the kairos_rag Hermes plugin (via os.write(2) atomic writes)
+    and publishes each as JSON to Redis pubsub RAG_EVENTS_CHANNEL so the
+    dispatcher can build a Langfuse child span under the parent gap trace.
+    When ``stderr_tail`` is provided, parsed sentinels are also appended to it
+    (capped at 100 entries) for EOF-time inspection by the caller.
     """
     import select as _select
+    _rag_line_buf = ""  # v7.91-P3: accumulates partial lines across chunks for sentinel parse
     while True:
         r, _, _ = _select.select([master_fd], [], [], 0.5)
         if master_fd in r:
@@ -660,6 +597,26 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                 break
             decoded = chunk.decode('utf-8', errors='replace')
             output_chunks.append(decoded)
+
+            # v7.91-P3: stream-parse lines for KAIROS_RAG_* sentinels.
+            # Fast-path skip: if the prefix isn't in this chunk and no partial
+            # line carried over, don't pay the buffer cost.
+            if "KAIROS_RAG_" in decoded or _rag_line_buf:
+                _rag_line_buf += decoded
+                while "\n" in _rag_line_buf:
+                    _rag_line, _rag_line_buf = _rag_line_buf.split("\n", 1)
+                    _rag_line = _rag_line.strip()
+                    if _rag_line.startswith("KAIROS_RAG_ERROR ") or _rag_line.startswith("KAIROS_RAG_EVENT "):
+                        _publish_rag_sentinel(_rag_line, trace_id, AGENT)
+                        if stderr_tail is not None:
+                            stderr_tail.append(_rag_line[:1500])
+                            if len(stderr_tail) > 100:
+                                del stderr_tail[0]
+                # Bound buffer memory: if >64KiB without a newline, drop the front.
+                # Prevents a chunk containing "KAIROS_RAG_" that never terminates
+                # from accumulating unbounded buffer.
+                if len(_rag_line_buf) > 65536:
+                    _rag_line_buf = _rag_line_buf[-4096:]
             # v7.28-2: Strip <think>...</think> from chunk before counting (MiniMax thinking is normal)
             _v728_2_for_count = re.sub(r"<think>.*?</think>", "", decoded, flags=re.DOTALL) if "<think>" in decoded else decoded
             # Rough token estimate: words × 1.3
@@ -671,7 +628,7 @@ def stream_reader(master_fd: int, output_chunks: list, token_count: list,
                 token_count.append(len(decoded))
             # If >10K chars accumulated since last tool call AND we've had at least 1 tool call,
             # the agent is producing too much prose between actions → kill
-            if (token_count[1] > 50000 and tool_use_detected.is_set()  # v7.42: bumped from 30K — architecture/research phases need more synthesis room between tool calls
+            if (token_count[1] > 300000 and tool_use_detected.is_set()  # v7.89: bumped from 120K — architecture/research phases need more synthesis room between tool calls
                     and tool_use_events[0] > 0 and not kill_event.is_set()):
                 _v727b_hpid = hermes_pid_holder[0] if hermes_pid_holder else None
                 if _v727b_hpid:
@@ -840,9 +797,13 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
     # v7.23-B: pass session start time for no-output wall-clock watchdog
     import time as _v723b_t
     _v723b_session_start = _v723b_t.time()
+    # v7.91-P3: pass stderr_tail (parsed KAIROS_RAG_* sentinels) + trace_id.
+    # Both are captured for dispatcher visibility; trace_id threads the gap's
+    # Langfuse parent trace through the Redis pubsub payload.
+    _rag_stderr_tail: list = []
     reader_thread = threading.Thread(
         target=stream_reader,
-        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event, hermes_pid_holder, _v723b_session_start, 300)
+        args=(master_fd, output_chunks, token_count, tool_use_events, tool_use_detected, kill_event, hermes_pid_holder, _v723b_session_start, 300, _rag_stderr_tail, trace_id)
     )
     reader_thread.start()
 
@@ -864,6 +825,12 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
     # If killed by watchdog, retry once with forced tool-use prompt
     if exit_code == -_signal.SIGTERM.value or kill_event.is_set():
         print(f"[{AGENT}] WATCHDOG triggered — retrying with forced tool-use prompt")
+        # v7.82: operator skip-file mechanism — prevents infinite blocks
+        _wskip = Path(f"/var/lib/karios/coordination/watchdog-skip/{AGENT}")
+        if _wskip.exists():
+            _wskip.unlink(missing_ok=True)
+            print(f"[{AGENT}] WATCHDOG-SKIP: abort retry, marking task done")
+            return full_output + "\n[WATCHDOG-SKIPPED]"
         # v7.38: context-aware retry — only inject SUGGESTED-FIX language when the original
         # query actually contains a CRITICAL ISSUES section (i.e., it's a CODE-REVISE/CODE-REQUEST).
         # Otherwise (RESEARCH/ARCH-DESIGN/E2E-REVIEW/TEST-RUN), use a task-generic retry that
@@ -885,14 +852,20 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
                 "Watchdog killed your previous session for excessive prose without tool calls.\n\n"
                 + query
             )
-        retry_output = subprocess.run(
-            [HERMES_CMD, "chat",
-             "--profile", profile,
-             "--query", retry_query,
-             "--toolsets", "terminal,file,web",
-             "-v"],
-            capture_output=True, text=True, timeout=1800, cwd="/root"
-        ).stdout + "\n[WATCHDOG-RETRY]"
+        try:
+            _retry_proc = subprocess.run(
+                [HERMES_CMD, "chat",
+                 "--profile", profile,
+                 "--query", retry_query,
+                 "--toolsets", "terminal,file,web",
+                 "-v"],
+                capture_output=True, text=True, timeout=600, cwd="/root"  # v7.87: raised from 300 so ABT FAST PATH can complete
+            )
+            retry_output = _retry_proc.stdout + "\n[WATCHDOG-RETRY]"
+        except subprocess.TimeoutExpired as _te:
+            _partial = _te.stdout.decode("utf-8", errors="replace") if _te.stdout else ""
+            retry_output = _partial + "\n[WATCHDOG-RETRY-TIMEOUT]"
+            print(f"[{AGENT}] v7.87 retry TIMEOUT after 600s - {len(_partial)} chars preserved")
         # v7.21-B: escalate if retry STILL produced no tool_use (prose-mode persistent)
         if "tool_use" not in retry_output and len(retry_output) > 1500:
             try:
@@ -960,16 +933,25 @@ Watchdog SIGTERMs at 3000 chars with 0 tool_use. Start with a tool call. NO PROS
 
 
 def _run_hermes_fallback(query: str, profile: str, hermes_cmd: str, trace_id: str = None) -> str:
-    """Fallback subprocess.run when PTY is unavailable."""
-    result = subprocess.run(
-        [hermes_cmd, "chat",
-         "--profile", profile,
-         "--query", query,
-         "--toolsets", "terminal,file,web",
-         "-v"],
-        capture_output=True, text=True, timeout=1800, cwd="/root"
-    )
-    return result.stdout + result.stderr
+    """Fallback subprocess.run when PTY is unavailable. B4: adds TimeoutExpired handler."""
+    try:
+        result = subprocess.run(
+            [hermes_cmd, "chat",
+             "--profile", profile,
+             "--query", query,
+             "--toolsets", "terminal,file,web",
+             "-v"],
+            capture_output=True, text=True, timeout=1800, cwd="/root"
+        )
+        return result.stdout + result.stderr
+    except subprocess.TimeoutExpired as _te:
+        _partial = _te.stdout.decode("utf-8", errors="replace") if _te.stdout else ""
+        print(f"[{AGENT}] _run_hermes_fallback TIMEOUT 1800s -- {len(_partial)} chars")
+        return _partial + "\n[FALLBACK-TIMEOUT]"
+    except FileNotFoundError:
+        return f"ERROR: Hermes not found at {hermes_cmd}"
+    except Exception as _fbe:
+        return f"ERROR: _run_hermes_fallback: {_fbe}"
 
 
 # ── Post-Hermes Hook: code-review-graph Audit ──────────────────────────────────
@@ -1029,6 +1011,16 @@ def process_message(msg: dict) -> dict:
     a JSON-encoded `payload` field. Detect that shape and unwrap before parsing.
     Backwards-compatible with v6 flat-field messages.
     """
+    # [v7.95 xread-debug] raw message dump BEFORE envelope unwrap
+    try:
+        _raw_payload_field = msg.get("payload", "")
+        _raw_subject_outer = msg.get("subject", "")
+        _raw_gap_outer = msg.get("gap_id", "")
+        _raw_stream_key = get_stream_key() if callable(globals().get("get_stream_key")) else "?"
+        print(f'[v7.95 xread-debug] stream={_raw_stream_key} outer.gap_id="{_raw_gap_outer}" outer.subject="{str(_raw_subject_outer)[:80]}" payload_field_head="{str(_raw_payload_field)[:200]!s}"', flush=True)
+    except Exception as _re:
+        print(f"[v7.95 xread-debug] raw-dump failed: {type(_re).__name__}: {_re}", flush=True)
+
     # v7.1 envelope unwrap
     if msg.get("version") == "v7" and "payload" in msg:
         try:
@@ -1047,10 +1039,65 @@ def process_message(msg: dict) -> dict:
     trace_id = msg.get("trace_id") or new_trace_id(subject[:20])
     priority = msg.get("priority", "normal")
 
+    # [v7.95 xread-debug] parsed values after unwrap
+    print(f'[v7.95 xread-debug] parsed msg_id={msg_id} subject_parsed="{str(subject)[:80]}" gap_id_parsed="{gap_id}" body_head="{str(body)[:100]}"', flush=True)
+
+    # [v7.95 gap-id-sanitizer] STOPGAP — authoritatively derive gap_id from subject.
+    # Rationale: if any upstream mutation has corrupted gap_id (known bug pre-v7.95),
+    # the subject is our source of truth (it's what the dispatcher logged at `→ agent`).
+    # v7.114: widened from narrow ARCH-IT-\d+ to full _GAP_ID_RE_C pattern so FEAT-*,
+    # BUG-*, and all other gap ID schemes are recognized (not just ARCH-IT-*).
+    # Strategy: findall broad gap-token candidates, validate each via fullmatch against
+    # the canonical pattern. Use import as _re_san to avoid scoping collision with a
+    # later `import re` inside this function.
+    try:
+        import re as _re_san
+        # Broad candidate extraction: any UPPER-token of form PREFIX-SUFFIX in subject.
+        _gap_id_canon_re = _re_san.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9a-z]+$')
+        _gap_candidates = _re_san.findall(r'\b([A-Z][A-Z0-9]*(?:-[A-Z0-9a-z]+)+)\b', str(subject) or "")
+        _gap_from_subject = None
+        for _cand in _gap_candidates:
+            if _gap_id_canon_re.fullmatch(_cand):
+                _gap_from_subject = _cand
+                break
+        if _gap_from_subject:
+            if gap_id and gap_id != _gap_from_subject:
+                print(f'[v7.95 gap-id-sanitizer] WARN mutation-detected subject="{subject[:80]}" parsed.gap_id="{gap_id}" -> overriding to "{_gap_from_subject}"', flush=True)
+                gap_id = _gap_from_subject
+                msg["gap_id"] = _gap_from_subject
+            elif not gap_id:
+                # gap_id empty — fill from subject silently
+                gap_id = _gap_from_subject
+                msg["gap_id"] = _gap_from_subject
+    except Exception as _se:
+        print(f"[v7.95 gap-id-sanitizer] error: {type(_se).__name__}: {_se}", flush=True)
+
     print(f"[{AGENT}] Processing: {from_agent} → {subject} (trace={trace_id})")
     stream_progress("message_received", f"Processing: {subject}",
                    gap_id=gap_id, trace_id=trace_id,
                    detail={"from": from_agent, "priority": priority})
+
+    # v7.101-C: terminal-state + invalid-gap_id guard — skip full Hermes session for gaps
+    # already done OR with invalid gap_id (e.g. "none"). Root cause of stream:code-blind-tester
+    # growth: orphan storm entries for terminal gaps burned 4-8 min of Hermes time each.
+    # The dispatcher's orphan probe skips terminal gaps at dispatch time (line 3489), but entries
+    # already in the stream can only be filtered here. gap_id="none" loop fix: v7.102-A blocks
+    # dispatcher from generating new none entries, but pre-existing entries must be cleared here.
+    import re as _v7101c_re
+    _GAP_ID_RE_C = _v7101c_re.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9a-z]+$')  # B1: fixed — added $ anchor and a-z to match dispatcher _GAP_ID_RE
+    if gap_id and not _GAP_ID_RE_C.match(gap_id):
+        print(f"[{AGENT}] v7.101-C SKIP invalid gap_id={gap_id!r} subject={subject[:60]!r}")
+        return {"gap_id": gap_id, "result_preview": f"SKIPPED invalid gap_id", "coding_complete": False}
+    if gap_id:
+        try:
+            _v7101c_st_path = Path("/var/lib/karios/orchestrator/state.json")
+            _v7101c_st = json.loads(_v7101c_st_path.read_text()) if _v7101c_st_path.exists() else {}
+            _v7101c_state = _v7101c_st.get("active_gaps", {}).get(gap_id, {}).get("state", "")
+            if _v7101c_state in ("completed", "closed", "cancelled", "escalated", "escalated_v792"):
+                print(f"[{AGENT}] v7.101-C SKIP terminal gap={gap_id} state={_v7101c_state} subject={subject[:60]!r}")
+                return {"gap_id": gap_id, "result_preview": f"SKIPPED terminal {_v7101c_state}", "coding_complete": False}
+        except Exception as _v7101c_e:
+            print(f"[{AGENT}] v7.101-C terminal-guard check failed (failing open): {_v7101c_e}")
 
     # Determine phase from subject
     phase = "idle"
@@ -1272,8 +1319,26 @@ def process_message(msg: dict) -> dict:
             "monitor": ["MONITORING-COMPLETE"],
         }
         allowed = AGENT_ALLOWED_SUBJECTS.get(AGENT, [])
+        # v7.93 FIX (rca-architect-empty-output-2026-04-23): anchor marker
+        # match to start-of-line followed by whitespace + non-whitespace token
+        # (i.e. actual CLI-style emission like "[ARCH-COMPLETE] ARCH-IT-093 ...").
+        # Previous substring scan `f"[{kind}]" in result` false-matched when the
+        # Hermes agent's NARRATION contained the marker inside backticks
+        # ("Cannot send `[ARCH-COMPLETE]` ..."), causing agent-worker to forge
+        # `[ARCH-COMPLETE]` emissions with empty body — the 237-nudge wedge
+        # for ARCH-IT-093. Also require the current gap_id to appear on the
+        # same line when gap_id is known, to kill cross-gap bleed.
+        import re as _rex_kind
         for kind in allowed:
-            if f"[{kind}]" in result:
+            if gap_id:
+                _pat = _rex_kind.compile(
+                    rf"(?m)^\s*\[{_rex_kind.escape(kind)}\]\s+{_rex_kind.escape(gap_id)}\b"
+                )
+            else:
+                _pat = _rex_kind.compile(
+                    rf"(?m)^\s*\[{_rex_kind.escape(kind)}\]\s+\S"
+                )
+            if _pat.search(result):
                 extracted_subject_kind = kind
                 break
 
@@ -1378,7 +1443,7 @@ def get_pending_messages_file() -> list:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def main():
-    global _stream_thread, _stop_stream
+    global _stream_thread, _stop_stream, _heartbeat_thread
 
     print(f"[{AGENT}] Agent worker v3.0 starting...")
     # v7.18: Reap orphaned Hermes processes for this profile before subscribing to streams
@@ -1436,7 +1501,7 @@ def main():
     # Orchestrator's _file_inbox_fallback() and _inbox_fallback() will pick this up.
     def _notify_orchestrator_completion(result: dict):
         gap_id = result.get("gap_id", "none")
-        trace_id = (result.get("trace_id") or "").strip() or f"completion-{gap_id}-{int(time.time())}"  # v7.100-A: ensure trace_id is never empty/None before xadd
+        trace_id = result.get("trace_id", "")
         coding_complete = result.get("coding_complete", False)
         agent = result.get("agent", AGENT)
         result_preview = result.get("result_preview", "(no output)")[:200]
@@ -1450,10 +1515,20 @@ def main():
         # Otherwise fall back to the generic [COMPLETE] for the orchestrator's [COMPLETE] handler.
         ext_kind = result.get("extracted_subject_kind")
         ext_json = result.get("extracted_json")
-        if ext_kind and ext_json and coding_complete:
-            subject = f"[{ext_kind}] {gap_id} iteration {ext_json.get('iteration', 1)}"
-            body = json.dumps(ext_json)
-            print(f"[{AGENT}] Routing as [{ext_kind}] with structured JSON body ({len(body)} chars)")
+        if ext_kind and coding_complete:
+            # v7.66: ext_json is optional — architect/RESEARCH completions have no JSON body
+            if ext_json:
+                body = json.dumps(ext_json)
+                iteration = ext_json.get('iteration', 1)
+            else:
+                body = ""
+                # extract iteration from result text e.g. "iteration 2" or "iter 2"
+                # v7.88 FIX: result is a dict — extract text from result_full not the dict itself
+                _result_text = result.get('result_full', '') if isinstance(result, dict) else (result or '')
+                _iter_m = re.search(r'iteration[\s_-]*(\d+)', _result_text, re.IGNORECASE)
+                iteration = int(_iter_m.group(1)) if _iter_m else 1
+            subject = f"[{ext_kind}] {gap_id} iteration {iteration}"
+            print(f"[{AGENT}] v7.66 routing as [{ext_kind}] iter={iteration} json={ext_json is not None}")
         else:
             subject = f"[{status}] {agent} completed gap={gap_id} phase={phase} trace={trace_id}"
             body = f"""Agent: {agent}
@@ -1531,10 +1606,11 @@ iteration_status. Check /var/lib/karios/iteration-tracker/{gap_id}/ for outputs.
         for msg in messages:
             try:
                 consumed_ids = []  # Track consumed message IDs for deletion
+                result = None
                 if isinstance(msg, tuple):
                     msg_id, msg_data = msg
+                    consumed_ids.append(msg_id)  # v7.86: consume BEFORE processing so XDEL always happens, even on exception
                     result = process_message(msg_data)
-                    consumed_ids.append(msg_id)
                 else:
                     result = process_message(msg)
                 # FIX v5.1: Delete consumed messages from stream so they're not re-read next cycle.
@@ -1543,6 +1619,9 @@ iteration_status. Check /var/lib/karios/iteration-tracker/{gap_id}/ for outputs.
                 # Also use the same redis connection for both read and delete to avoid
                 # the "XDEL on a non-existent stream" race (XDEL on a stream key that
                 # already had all messages reaped by a prior drain is a no-op, not an error).
+                # v7.86 at-most-once: XDEL always happens. Side effects (Hermes, Telegram,
+                # state writes) are NOT idempotent — re-running on exception causes double-invocation.
+                # v7.114-FIX3 REVERTED: DLQ retry was more risk than Bug 13 (re-read storm).
                 if r is not None:
                     for mid in consumed_ids:
                         try:
@@ -1560,6 +1639,14 @@ iteration_status. Check /var/lib/karios/iteration-tracker/{gap_id}/ for outputs.
                 _notify_orchestrator_completion(result)
             except Exception as e:
                 print(f"[{AGENT}] Processing error: {e}")
+                # v7.86: XDEL consumed_ids even on exception to prevent re-read loops (Bug 13)
+                if r is not None and consumed_ids:
+                    for mid in consumed_ids:
+                        try:
+                            r.xdel(get_stream_key(), mid)
+                            print(f"[{AGENT}] XDEL-ON-ERROR {get_stream_key()} {mid}")
+                        except Exception:
+                            pass
 
         # Update Obsidian alive file
         if heartbeat_count == 0:
@@ -1569,7 +1656,18 @@ iteration_status. Check /var/lib/karios/iteration-tracker/{gap_id}/ for outputs.
 
         time.sleep(2)
 
+def _sigterm_handler(signum, frame):
+    """B3: Graceful SIGTERM — stop threads and exit cleanly on systemd stop."""
+    print(f"[{AGENT}] SIGTERM received — shutting down gracefully")
+    _stop_stream.set()
+    _stop_heartbeat.set()
+    # v7.114: join heartbeat thread before exit so it is not mid-write to Redis
+    if _heartbeat_thread is not None:
+        _heartbeat_thread.join(timeout=2.0)
+    sys.exit(0)
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     try:
         main()
     except KeyboardInterrupt:
