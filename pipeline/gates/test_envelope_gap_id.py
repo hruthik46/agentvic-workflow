@@ -11,10 +11,18 @@ Asserts two invariants that back every Theme 1 retirement's unreachability proof
       regressions in either the sanitizer or the id regex.
 
   (2) Structural — AST-parse parse_message in the live dispatcher, locate the
-      FIRST assignment to the name gap_id, assert its RHS contains a
-      data.get("gap_id") call. Catches regressions where someone reorders
-      parse_message to parse subject/body prose BEFORE reading the envelope
-      (which would reintroduce the Theme 1 prose-parsing pathology).
+      FIRST assignment to the name gap_id (traversal is depth-first via
+      ast.iter_child_nodes: sibling statements are visited in source order,
+      but the walk descends into nested blocks — if/try/for — before
+      continuing past their parent. In the current dispatcher the first
+      gap_id assignment is at top-level of parse_message so DFS and source
+      order agree; if a future change inserts "if cond: gap_id = ..." BEFORE
+      the envelope read, DFS would report the nested assignment as first.
+      Upgrade to a source-order walk if that class of regression matters.)
+      Assert its RHS contains a data.get("gap_id") call. Catches regressions
+      where someone reorders parse_message to parse subject/body prose
+      BEFORE reading the envelope (which would reintroduce the Theme 1
+      prose-parsing pathology).
 
 Together: fixture pass + structural pass = envelope wins over subject prose at
 the dispatcher receive boundary. Each R-3 Theme 1 retirement cites this gate's
