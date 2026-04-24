@@ -4482,7 +4482,6 @@ def parse_message(msg_id: str, data: dict):
                 if gid_raw.startswith(prefix):
                     gid_raw = gid_raw[len(prefix):]
                     break
-            gid_raw = gid_raw.rstrip(":")  # v7.77: strip trailing colon from [FAN-IN] ARCH-IT-070: body
             gid = gid_raw
             # Also try regex on body in case subject was wholly different
             import re as _re
@@ -4501,10 +4500,6 @@ def parse_message(msg_id: str, data: dict):
         im = _re.search(r"iteration[=:\s]+(\d+)", body)
         if im:
             iteration = int(im.group(1))
-        # v7.98 Fix-B: pre-validate gap_id before load_gap to reject junk tokens
-        if not _GAP_ID_RE.match(gid):
-            print(f"[dispatcher] [FAN-IN] drop: invalid gap_id token {gid!r} in subject={subject!r}")
-            return
         gap_data = load_gap(gid)
 
         # Item C (ARCH-IT-ARCH-v11): code-review-graph rubric — v7.10 downgrade to warning when real commit shipped

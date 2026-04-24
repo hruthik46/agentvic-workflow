@@ -1,11 +1,11 @@
 {
-  "description": "Envelope absent + [FAN-IN] subject ending in colon. v7.77 colon-strip fallback must keep working (file-inbox path still hits this).",
+  "description": "R-3 session-9: v7.77 retired. Envelope absent + [FAN-IN] colon-suffix subject. Post-R-2, this path is unreachable in production — both inbox paths (file-inbox line 320, redis-inbox line 393) rstrip(':,') before promote, so envelope_gap_id arrives clean and the session-3 guard fires. Handler-level fallback now returns gid with colon intact; load_gap(_GAP_ID_RE end-anchor) blocks it safely. See fileinbox_pos_colon_stripped_v7_77.json for the real production path.",
   "input": {
     "subject": "[FAN-IN] ARCH-IT-070: continuing handoff",
     "body": "",
     "gap_id": null
   },
   "expected": {
-    "gid": "ARCH-IT-070"
+    "gid": "ARCH-IT-070:"
   }
 }
