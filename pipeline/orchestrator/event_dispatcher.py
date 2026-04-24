@@ -3814,23 +3814,6 @@ def parse_message(msg_id: str, data: dict):
 
     print(f"[dispatcher] ← {sender}: {subject} (trace={trace_id})")
 
-    # v7.96: outbound LLM-hallucination sanitizer
-    # Cross-check: if subject embeds gap_id X AND body embeds a DIFFERENT gap_id Y, rebind gap_id
-    # to the envelope-canonical value. Catches cases where tester/CBT/backend LLM hallucinates
-    # gap_ids in reply body (heavily-remembered completed gaps win over actual target).
-    _v796_subj_gap = None
-    _v796_body_gap = None
-    _v796_m = re.search(r"\b(ARCH-IT-\d+)\b", subject or "")
-    if _v796_m:
-        _v796_subj_gap = _v796_m.group(1)
-    _v796_m = re.search(r"\b(ARCH-IT-\d+)\b", body or "")
-    if _v796_m:
-        _v796_body_gap = _v796_m.group(1)
-    if _v796_subj_gap and _v796_body_gap and _v796_subj_gap != _v796_body_gap:
-        _v796_canonical = gap_id or _v796_subj_gap
-        print(f"[dispatcher] v7.96 GAP-ID-MISMATCH subject={_v796_subj_gap} body={_v796_body_gap} envelope={gap_id} -> canonical={_v796_canonical}")
-        gap_id = _v796_canonical
-
     # v7.41 + v7.44: top-level terminal-state guard. Drop ANY message addressed to a gap
     # in active_gaps with state in (completed/closed/cancelled/escalated).
     # v7.44: file-inbox messages set gap_id=None explicitly; extract from subject/body
