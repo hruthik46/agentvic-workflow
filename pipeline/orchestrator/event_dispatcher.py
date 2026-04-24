@@ -2509,6 +2509,50 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
     recommendation = str(recommendation or "").strip().upper()
     if recommendation not in ("APPROVE", "REQUEST_CHANGES", "REJECT"):
         recommendation = "REQUEST_CHANGES"
+
+    # v8.0-A: Escalation gate -- drop E2E results if gap is already escalated.
+    # escalate_to_human() writes state=escalated but handle_e2e_results never checked it,
+    # so the pipeline kept re-dispatching CBT forever after escalation.
+    try:
+        _esc_state = load_state()
+        _esc_entry = _esc_state.get("active_gaps", {}).get(gap_id, {})
+        if _esc_entry.get("state") == "escalated":
+            print(f"[dispatcher] v8.0-A DROP E2E results for {gap_id} iter {iteration} -- gap is escalated, human must intervene first")
+            try:
+                telegram_alert(f"INFO {gap_id}: E2E iter {iteration} results dropped -- gap escalated. No action until human resolves.")
+            except Exception:
+                pass
+            return
+    except Exception as _esc_e:
+        print(f"[dispatcher] v8.0-A escalation check failed (non-blocking): {_esc_e}")
+
+    # v8.0-B: Convergence detector -- escalate when CBT rating stops improving.
+    # Prevents infinite CBT loop when a structural bug keeps rating flat (e.g. 3/10 x N iters).
+    if iteration >= 3:
+        try:
+            _gap_dir = IT_DIR / gap_id / "phase-3-coding"
+            _prev_r = _prev2_r = None
+            _p1 = _gap_dir / f"iteration-{iteration-1}" / "e2e-results.json"
+            _p2 = _gap_dir / f"iteration-{iteration-2}" / "e2e-results.json"
+            if _p1.exists():
+                _prev_r = json.loads(_p1.read_text()).get("rating", 0)
+            if _p2.exists():
+                _prev2_r = json.loads(_p2.read_text()).get("rating", 0)
+            if _prev_r is not None and _prev2_r is not None and rating <= _prev_r and _prev_r <= _prev2_r:
+                _stall_msg = f"CBT ratings {_prev2_r}->{_prev_r}->{rating} across iters {iteration-2}-{iteration} (no improvement)"
+                print(f"[dispatcher] v8.0-B CONVERGENCE STALL {gap_id}: {_stall_msg} -- escalating")
+                try:
+                    telegram_alert(f"ESCALATE {gap_id}: {_stall_msg}")
+                except Exception:
+                    pass
+                _issues_str = "; ".join(str(i) for i in critical_issues[:5])
+                escalate_to_human(gap_id, "CBT rating not converging",
+                                  f"{_stall_msg}. Issues: {_issues_str}",
+                                  rating=rating, iteration=iteration)
+                return
+        except Exception as _conv_e:
+            print(f"[dispatcher] v8.0-B convergence check failed (non-blocking): {_conv_e}")
+
     # v7.50: live-API evidence gate
     _v750_review = {"rating": rating, "critical_issues": critical_issues,
                     "evidence": evidence or {}, "summary": ""}  # v7.65: use actual evidence
