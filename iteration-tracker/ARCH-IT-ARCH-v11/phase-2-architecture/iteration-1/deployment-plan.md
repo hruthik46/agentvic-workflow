@@ -407,6 +407,217 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | python3 -c "
 
 ---
 
+## Rollback Runbook — ARCH-IT-ARCH-v11
+
+### Overview
+This section defines how to detect, invoke, clean up, and verify rollback for each deployed item (A–E).
+
+### Rollback Detection Triggers
+| Trigger | Detection Method | Severity |
+|---------|-----------------|----------|
+| Orchestrator crash during Phase 3–5 | `journalctl -u karios-orchestrator-sub --since "10 min ago" \| grep "panic\|SIGSEGV"` | Critical |
+| Agent-worker crash during coding | `systemctl status karios-backend-worker` shows `failed` | High |
+| Schema validation false positives (log-only → enforced in iter 2) | `grep "SCHEMA VIOLATION" /var/lib/karios/orchestrator/event_dispatcher.log` | Medium |
+| CODING-RETRY loop (>3 retries per gap) | `grep "CODING-RETRY" /var/lib/karios/orchestrator/event_dispatcher.log \| wc -l` | High |
+| Gitea push gate false negative | Manual: `git log --oneline origin/main...HEAD` shows missing commits | Medium |
+| Watchdog PTY failure | `journalctl -u karios-backend-worker --since "5 min ago" \| grep "SIGKILL\|PTY"` | High |
+
+### Per-Item Rollback Procedures
+
+#### Item A: Pydantic Schema Validation — Rollback
+```bash
+# Step A-R1: Detect rollback need
+grep "SCHEMA VIOLATION.*rate > 5" /var/lib/karios/orchestrator/event_dispatcher.log && echo "ROLLBACK NEEDED"
+
+# Step A-R2: Disable schema validation (return to string-prefix only)
+sed -i 's/validate_message/# validate_message  # DISABLED/' /var/lib/karios/orchestrator/event_dispatcher.py
+
+# Step A-R3: Restart orchestrator
+systemctl restart karios-orchestrator-sub
+
+# Step A-R4: Verify rollback
+curl -s http://localhost:8080/readyz && echo "Orchestrator OK"
+grep "SCHEMA" /var/lib/karios/orchestrator/event_dispatcher.log | tail -5
+
+# Step A-R5: Clean up quarantine dir (preserve for later re-enablement)
+mv /var/lib/karios/agent-msg/schema-violations /var/lib/karios/agent-msg/schema-violations.DISABLED 2>/dev/null || true
+```
+
+#### Item B: BG-stub-no-op Self-Test — Rollback
+```bash
+# Step B-R1: Detect rollback need
+systemctl status karios-backend-worker | grep "failed\|inactive" && echo "ROLLBACK NEEDED"
+
+# Step B-R2: Remove self-test CLI and disable
+rm -f /usr/local/bin/karios-self-test
+rm -f /var/lib/karios/coordination/requirements/BG-stub-no-op.md
+
+# Step B-R3: Restore standard timeouts (remove accelerated timeouts)
+# In event_dispatcher.py: remove bg_self_test_accelerated_timeouts override
+
+# Step B-R4: Restart orchestrator
+systemctl restart karios-orchestrator-sub
+
+# Step B-R5: Verify rollback
+ls /usr/local/bin/karios-self-test 2>&1 | grep -q "No such" && echo "CLI removed: OK"
+```
+
+#### Item C: code-review-graph Rubric Gate — Rollback
+```bash
+# Step C-R1: Detect rollback need
+grep "CODING-RETRY.*code_review_graph" /var/lib/karios/orchestrator/event_dispatcher.log | tail -3
+
+# Step C-R2: Restore backup agent-worker
+cp /var/lib/karios/backups/20260419-ARCH-IT-ARCH-v11-pre/agent-worker /usr/local/bin/agent-worker
+chmod 755 /usr/local/bin/agent-worker
+
+# Step C-R3: Remove CODING-RETRY gate from dispatcher
+# In event_dispatcher.py: remove handle_coding_complete() code_review_graph check
+
+# Step C-R4: Restart agents
+systemctl restart karios-backend-worker karios-frontend-worker karios-devops-agent
+
+# Step C-R5: Verify rollback
+systemctl status karios-backend-worker | grep "active (running)"
+```
+
+#### Item D: Gitea Push Verification Gate — Rollback
+```bash
+# Step D-R1: Detect rollback need
+grep "GITEA-PUSH-PENDING" /var/lib/karios/orchestrator/event_dispatcher.log | tail -5
+
+# Step D-R2: Remove verify_gitea_push() from dispatcher
+# In event_dispatcher.py: remove verify_gitea_push() call from handle_prod_deployed()
+
+# Step D-R3: Restart orchestrator
+systemctl restart karios-orchestrator-sub
+
+# Step D-R4: Verify rollback
+curl -s http://localhost:8080/readyz && echo "Orchestrator OK"
+```
+
+#### Item E: Watchdog Kill-on-No-Tool-Call — Rollback
+```bash
+# Step E-R1: Detect rollback need
+journalctl -u karios-backend-worker --since "10 min ago" | grep "SIGKILL.*hermes" | tail -5
+
+# Step E-R2: Restore subprocess.run path
+cp /var/lib/karios/backups/20260419-ARCH-IT-ARCH-v11-pre/agent-worker /usr/local/bin/agent-worker
+chmod 755 /usr/local/bin/agent-worker
+
+# Step E-R3: Restart backend worker
+systemctl restart karios-backend-worker
+
+# Step E-R4: Verify rollback
+systemctl status karios-backend-worker | grep "active (running)"
+```
+
+### Full System Rollback (All Items)
+```bash
+# Full rollback to pre-ARCH-IT-ARCH-v11 state
+cd /var/lib/karios/orchestrator
+git stash  # stash any local changes
+git checkout v7.5  # or the pre-deployment tag
+
+# Restore all backups
+for item in A B C D E; do
+  case $item in
+    A) cp /var/lib/karios/backups/20260419-ARCH-IT-ARCH-v11-pre/message_schemas.py /var/lib/karios/orchestrator/ 2>/dev/null || true ;;
+    C|E) cp /var/lib/karios/backups/20260419-ARCH-IT-ARCH-v11-pre/agent-worker /usr/local/bin/agent-worker ;;
+  esac
+done
+
+systemctl restart karios-orchestrator-sub karios-backend-worker karios-frontend-worker karios-devops-agent
+sleep 10
+
+# Verify all services healthy
+for agent in orchestrator backend frontend devops; do
+  systemctl status karios-${agent} --no-pager -n 1 | grep "active"
+done
+```
+
+### Rollback Verification Checklist
+- [ ] All 5 agents heartbeat fresh (< 60s ago)
+- [ ] `curl http://localhost:8080/readyz` returns 200
+- [ ] No `[CODING-RETRY]` messages in last 5 minutes
+- [ ] No `[GITEA-PUSH-PENDING]` messages in last 5 minutes
+- [ ] `karios-self-test` does not exist or returns "not found"
+- [ ] Schema violations are NOT quarantined (iteration 1 log-only)
+- [ ] Telegram bot responds to `/status`
+
+---
+
+## Resource Limits — ARCH-IT-ARCH-v11
+
+### Overview
+Production limits to prevent resource exhaustion during migration workloads.
+
+### Orchestrator Resource Limits
+| Resource | Limit | Rationale |
+|----------|-------|-----------|
+| Max concurrent gaps | 10 | Prevent memory pressure from too many parallel meta-loop iterations |
+| Max queue depth (Redis) | 100 | Prevent message backlog from overwhelming dispatcher |
+| Max message size | 1MB | Prevent malicious agents from sending massive JSON bodies |
+| Schema violation quarantine | 100 files | Prevent disk exhaustion from quarantine overflow |
+
+### Migration Engine Resource Limits
+| Resource | Limit | Rationale |
+|----------|-------|-----------|
+| Max concurrent transfers per VM | 4 | Prevent saturating host disk I/O |
+| Max concurrent transfers per host | 8 | Prevent ESXi/NBDS host overload |
+| Max concurrent migrations per batch | 20 | Ceph RBD export parallelism limit |
+| Transfer stall threshold | 10 min (600s) | StallDetection triggers MIG_TRANSFER_TIMEOUT after 10min no progress |
+| NFS staging quota | 500GB | Prevent staging disk from filling |
+| Ceph pool watermark | 80% | Alert at 80%, block new migrations at 90% |
+
+### Stall Detection Enforcement (TRANSFER_TIMEOUT)
+The `ProgressTracker` in `internal/migration/progress.go` enforces transfer timeouts:
+```go
+// StallThreshold default: 60s (configurable)
+// When rate == 0 for > StallThreshold:
+//   - IsStalled() returns true
+//   - SSE event "disk_stalled" emitted
+//   - Operator alerted via Telegram
+//   - ErrTransferTimeout(MIG_TRANSFER_TIMEOUT) returned
+//
+// Stall detection is NOT an automatic FSM transition.
+// Human operator must decide: retry, cancel, or rollback.
+```
+
+### Ceph Pool Thresholds
+| Pool | Warning | Critical | Action |
+|------|---------|----------|--------|
+| Ceph pools (RBD) | 70% | 85% | Pause new migrations |
+| Ceph pools (RBD) | 90% | 95% | Block all new migrations |
+| Staging NFS | 400GB | 450GB | Force cleanup of completed migrations |
+
+### Queue Size Limits
+| Queue | Max Size | Overflow Behavior |
+|-------|----------|------------------|
+| Redis migration queue | 100 items | Reject new items, alert operator |
+| Disk transfer buffer | 64MB per disk | Spill to staging NFS |
+| SSE client buffer | 1000 events | Drop oldest events |
+
+### Verification Commands
+```bash
+# Check Ceph pool usage
+ceph df | grep -E "rbd|var/lib/ceph"
+
+# Check NFS staging usage
+df -h /var/lib/karios-migration/staging
+
+# Check Redis queue depth
+redis-cli LLEN karios:migration:queue
+
+# Check concurrent transfers
+curl -s http://localhost:8089/metrics | grep "migration_transfer_active"
+
+# Check stall detection
+curl -s http://localhost:8089/migrations | jq '.[] | select(.state=="stalled")'
+```
+
+---
+
 ## v7.6 Artifact
 
 After all items deployed and self-test passes, tag the deployment:

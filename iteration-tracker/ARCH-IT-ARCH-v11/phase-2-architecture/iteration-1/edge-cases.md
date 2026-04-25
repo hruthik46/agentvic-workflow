@@ -260,3 +260,13 @@ Edge cases are organized by item (A–F). Each edge case describes the failure m
 - **Trigger**: Both gap IDs different, both in `active_gaps`
 - **Mitigation**: Orchestrator handles concurrent gaps via independent state entries
 - **Expected behavior**: Both progress independently
+
+### Cross-05: StateRetrying FSM is a manual-retry state (not automatic)
+- **Scenario**: Migration enters `StateRetrying` after `StateFailed + EventRetry`
+- **Clarification**: StateRetrying is NOT a dead state. It has defined transitions:
+  - Enter: `StateFailed + EventRetry → StateRetrying`
+  - Exit via EventStart: `StateRetrying → StatePreflight` (manual operator retry)
+  - Exit via EventCancel: `StateRetrying → StateCancelled`
+- **Important**: There is NO automatic timeout transition from StateRetrying. The operator must explicitly send `EventStart` to resume from the checkpoint, or `EventCancel` to abort. This is intentional — operator decision is required before retry to avoid infinite retry loops.
+- **Implementation**: See `internal/migration/fsm.go` lines 129-131, 143
+- **Disk-level retry**: `DiskStateRetrying` in `DiskTransferState` FSM (ARCHITECTURE.md §38) is separate and DOES automatically re-enter `TRANSFERRING` via `runFromTransfer()` checkpoint logic.
