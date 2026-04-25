@@ -3616,8 +3616,6 @@ def progress_probe_check():
         ag = st.get("active_gaps", {})
         now = int(_t.time())
         for gap_id, ge in ag.items():
-            if not _GAP_ID_RE.match(gap_id or ""):  # v7.103-A: reject invalid gap_ids before any processing
-                continue
             if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792", "paused"):  # v7.97 H1: include v792 sentinel; v7.116-E: paused gaps must also be skipped
                 continue
             # v7.8.1: phase lives in gap metadata file, not active_gaps entry. Use load_gap.
