@@ -4853,7 +4853,12 @@ def parse_message(msg_id: str, data: dict):
                 print(f"[dispatcher] ERROR: [E2E-RESULTS] message has no gap_id in subject: {subject!r} and trace/state fallback failed")
                 return
         else:
-            gid = tokens[0]
+            # R-3-GATE: e2eresults-gid-resolve-begin
+            if gap_id and _GAP_ID_RE.match(gap_id):
+                gid = gap_id
+            else:
+                gid = tokens[0]
+            # R-3-GATE: e2eresults-gid-resolve-end
         # v7.28-4: safe IndexError + try/except on int()
         _iter_token = None
         try:

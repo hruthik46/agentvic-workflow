@@ -394,6 +394,82 @@ def run_apisync_fixtures(fixtures_dir, gap_re, dispatcher_path):
     return passes, fails
 
 
+E2ERESULTS_BEGIN_MARKER = 'R-3-GATE: e2eresults-gid-resolve-begin'
+E2ERESULTS_END_MARKER = 'R-3-GATE: e2eresults-gid-resolve-end'
+
+
+def extract_e2eresults_resolver(source_path):
+    """Extract the [E2E-RESULTS] handler gid-resolution block delimited by
+    R-3-GATE markers (e2eresults-gid-resolve-begin/-end) from the live dispatcher
+    and return Python source for a callable
+    _e2eresults_resolve(tokens, gap_id, _GAP_ID_RE) -> gid.
+    The block is at 12-space indent inside parse_message (nested in the else-branch
+    of the tokens-empty check); dedent 12->4 so it sits inside our wrapper.
+    Signature takes tokens as a parameter because tokens is computed outside the
+    markers. Mirrors extract_apisync_resolver."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if E2ERESULTS_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif E2ERESULTS_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE e2eresults markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('            '):  # 12 spaces
+            dedented.append('    ' + ln[12:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError(f'unexpected indent in e2eresults block: {ln!r}')
+    header = 'def _e2eresults_resolve(tokens, gap_id, _GAP_ID_RE):\n'
+    footer = '\n    return gid\n'
+    return header + '\n'.join(dedented) + footer
+
+
+def run_e2eresults_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run e2eresults_*.json fixtures through the extracted [E2E-RESULTS] resolver.
+    Each fixture input has subject/gap_id; expected has gid. The harness pre-computes
+    tokens from subject (remaining after ']') so the resolver has its required
+    parameter. Mirrors run_apisync_fixtures; uses e2eresults-gid-resolve markers."""
+    import tempfile, runpy
+    wrapper_src = extract_e2eresults_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        os.unlink(tf_path)
+    resolver = ns['_e2eresults_resolve']
+
+    passes, fails = 0, 0
+    for fname in sorted(os.listdir(fixtures_dir)):
+        if not (fname.startswith('e2eresults_') and fname.endswith('.json')):
+            continue
+        fpath = os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        subject = inp.get('subject', '')
+        remaining = subject.split(']')[1].strip() if ']' in subject else subject
+        tokens = remaining.split()
+        got = resolver(tokens, inp.get('gap_id'), gap_re)
+        if got == expected.get('gid'):
+            print(f'  OK   {fname} ({fixture.get("description", "")[:50]}) -> gid={got!r}')
+            passes += 1
+        else:
+            print(f'  FAIL {fname}: gid: got {got!r}, expected {expected.get("gid")!r}')
+            fails += 1
+    return passes, fails
+
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -488,6 +564,15 @@ def main():
     as_pass, as_fail = run_apisync_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += as_pass
     fails += as_fail
+
+    # R-3 Theme 1 session #17 coverage: [E2E-RESULTS] handler gid-resolution.
+    # Exercises the e2eresults-gid-resolve-begin/-end block against e2eresults_*.json
+    # fixtures. Backs pre-work for v7.103-C and v7.104-B retirement: confirms
+    # envelope-first branch fires when envelope is present, and subject-parse
+    # fallback fires when envelope is absent.
+    er_pass, er_fail = run_e2eresults_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += er_pass
+    fails += er_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

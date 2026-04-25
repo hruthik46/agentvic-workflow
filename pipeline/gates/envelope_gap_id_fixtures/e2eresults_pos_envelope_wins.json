@@ -1,0 +1,10 @@
+{
+  "description": "E2E-RESULTS: envelope gap_id present and valid; subject has different token. gid = envelope value.",
+  "input": {
+    "subject": "[E2E-RESULTS] ARCH-IT-WRONG iteration 2",
+    "gap_id": "ARCH-IT-123"
+  },
+  "expected": {
+    "gid": "ARCH-IT-123"
+  }
+}
