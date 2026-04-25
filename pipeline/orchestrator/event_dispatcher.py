@@ -4157,14 +4157,19 @@ def parse_message(msg_id: str, data: dict):
     if subject.startswith("[COMPLETE]") or subject.startswith("[COMPLETE]"):
         # v7.5.2: re imported at module top
         # Extract gap_id from body (gap_id: ARCH-IT-XXX)
-        gap_id_match = re.search(r"gap_id[=:\s]+([A-Z][A-Z0-9-]+)", body or "")
-        if not gap_id_match:
-            gap_id_match = re.search(r"\bgap[=:]([A-Z][A-Z0-9-]+)", (body or "") + " " + (subject or ""))
+        # R-3-GATE: complete-gid-resolve-begin
+        if gap_id and _GAP_ID_RE.match(gap_id):
+            _extracted_gap_id = gap_id
+        else:
+            gap_id_match = re.search(r"gap_id[=:\s]+([A-Z][A-Z0-9-]+)", body or "")
+            if not gap_id_match:
+                gap_id_match = re.search(r"\bgap[=:]([A-Z][A-Z0-9-]+)", (body or "") + " " + (subject or ""))
+            _extracted_gap_id = gap_id_match.group(1).rstrip(";,. ") if gap_id_match else None
+        gap_id = _extracted_gap_id or gap_id  # v7.81b: fall back to parse_message gap_id
+        # R-3-GATE: complete-gid-resolve-end
         phase_match = re.search(r"phase[=:\s]+([\w.-]+)", (body or "") + " " + (subject or ""))
         coding_complete_match = re.search(r"coding_complete:\s*(True|False)", body or "")
         iteration_match = re.search(r"iteration:\s*(\d+)", body or "")
-        _extracted_gap_id = gap_id_match.group(1).rstrip(";,. ") if gap_id_match else None
-        gap_id = _extracted_gap_id or gap_id  # v7.81b: fall back to parse_message gap_id
         phase = phase_match.group(1).rstrip(";,. ") if phase_match else None
         iteration = int(iteration_match.group(1)) if iteration_match else 1
         coding_complete = coding_complete_match.group(1) == "True" if coding_complete_match else False

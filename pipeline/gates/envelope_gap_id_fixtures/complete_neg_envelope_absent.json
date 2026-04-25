@@ -1,0 +1,11 @@
+{
+  "description": "COMPLETE: envelope gap_id null; body has valid gap_id: ARCH-IT-077. gid = body-regex extracted value.",
+  "input": {
+    "subject": "[COMPLETE] agent completed phase=3-coding",
+    "body": "gap_id: ARCH-IT-077\ncoding_complete: True\niteration: 1",
+    "gap_id": null
+  },
+  "expected": {
+    "gid": "ARCH-IT-077"
+  }
+}

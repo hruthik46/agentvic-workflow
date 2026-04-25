@@ -1,0 +1,11 @@
+{
+  "description": "COMPLETE: envelope gap_id valid; body has gap_id: NONE (garbage). gid = envelope value, not NONE.",
+  "input": {
+    "subject": "[COMPLETE] agent completed phase=3-coding",
+    "body": "gap_id: NONE\ncoding_complete: True\niteration: 2",
+    "gap_id": "ARCH-IT-099"
+  },
+  "expected": {
+    "gid": "ARCH-IT-099"
+  }
+}
