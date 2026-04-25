@@ -550,6 +550,72 @@ def run_complete_fixtures(fixtures_dir, gap_re, dispatcher_path):
     return passes, fails
 
 
+
+ARCHREVIEWED_BEGIN_MARKER = 'R-3-GATE: arch-reviewed-gid-resolve-begin'
+ARCHREVIEWED_END_MARKER = 'R-3-GATE: arch-reviewed-gid-resolve-end'
+
+
+def extract_archreviewed_resolver(source_path):
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if ARCHREVIEWED_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif ARCHREVIEWED_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE arch-reviewed markers not found in dispatcher')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('            '):
+            dedented.append('    ' + ln[12:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError('unexpected indent in arch-reviewed block: {!r}'.format(ln))
+    NL = chr(10)
+    header = 'def _archreviewed_resolve(tokens, gap_id, _GAP_ID_RE):' + NL
+    footer = NL + '    return gid' + NL
+    return header + NL.join(dedented) + footer
+
+
+def run_archreviewed_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    import tempfile, runpy, json as _json, os as _os
+    wrapper_src = extract_archreviewed_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        _os.unlink(tf_path)
+    resolver = ns['_archreviewed_resolve']
+    passes, fails = 0, 0
+    for fname in sorted(_os.listdir(fixtures_dir)):
+        if not (fname.startswith('archreviewed_') and fname.endswith('.json')):
+            continue
+        fpath = _os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = _json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        subject = inp.get('subject', '')
+        remaining = subject.split(']')[1].strip() if ']' in subject else subject
+        tokens = remaining.split()
+        got = resolver(tokens, inp.get('gap_id'), gap_re)
+        exp_gid = expected.get('gid')
+        desc = fixture.get('description', '')[:50]
+        if got == exp_gid:
+            print('  OK   {} ({}) -> gid={!r}'.format(fname, desc, got))
+            passes += 1
+        else:
+            print('  FAIL {}: gid: got {!r}, expected {!r}'.format(fname, got, exp_gid))
+            fails += 1
+    return passes, fails
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -582,7 +648,7 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_')):
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_')):
             continue  # handler-path + file-inbox + apisync + e2eresults + complete fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
@@ -662,6 +728,15 @@ def main():
     cr_pass, cr_fail = run_complete_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += cr_pass
     fails += cr_fail
+
+    # R-3 Theme 1 session #24 coverage: [ARCH-REVIEWED]/[BLIND-REVIEWED] handler gid-resolution.
+    # Exercises the arch-reviewed-gid-resolve-begin/-end block against archreviewed_*.json
+    # fixtures. Backs pre-work for v7.104-D handle_arch_review() call site and v7.104-A
+    # retirement: confirms envelope-first branch fires when envelope is present, and
+    # subject-parse fallback fires when envelope is absent.
+    ar_pass, ar_fail = run_archreviewed_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += ar_pass
+    fails += ar_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

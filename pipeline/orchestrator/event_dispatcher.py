@@ -4030,7 +4030,16 @@ def parse_message(msg_id: str, data: dict):
         if len(parts) > 1:
             remaining = parts[1].strip()
             tokens = remaining.split()
-            gid = tokens[0]
+            # R-3-GATE: arch-reviewed-gid-resolve-begin
+            if gap_id and _GAP_ID_RE.match(gap_id):
+                gid = gap_id
+            else:
+                gid = tokens[0] if tokens else ""
+            # R-3-GATE: arch-reviewed-gid-resolve-end
+            # R-3-GATE: arch-reviewed-gid-enforce — reject invalid gid before handle_arch_review()
+            if not _GAP_ID_RE.match(gid or ""):
+                print(f"[dispatcher] [[ARCH-REVIEWED]] drop: invalid gid {gid!r} post-R-3-GATE in subject={subject!r}")
+                return
             iteration = int(tokens[tokens.index("iteration") + 1]) if "iteration" in tokens else 1
             try:
                 # v7.5: Extract JSON from body — file-inbox includes subject prefix + may have ```json fences
