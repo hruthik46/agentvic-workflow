@@ -1063,20 +1063,18 @@ def process_message(msg: dict) -> dict:
         # Broad candidate extraction: any UPPER-token of form PREFIX-SUFFIX in subject.
         _gap_id_canon_re = _re_san.compile(r'^(?:[A-Z0-9]+-)+[A-Z0-9a-z]+$')
         _gap_candidates = _re_san.findall(r'\b([A-Z][A-Z0-9]*(?:-[A-Z0-9a-z]+)+)\b', str(subject) or "")
-        _gap_from_subject = None
-        for _cand in _gap_candidates:
-            if _gap_id_canon_re.fullmatch(_cand):
-                _gap_from_subject = _cand
-                break
-        if _gap_from_subject:
-            if gap_id and gap_id != _gap_from_subject:
-                print(f'[v7.95 gap-id-sanitizer] WARN mutation-detected subject="{subject[:80]}" parsed.gap_id="{gap_id}" -> overriding to "{_gap_from_subject}"', flush=True)
-                gap_id = _gap_from_subject
-                msg["gap_id"] = _gap_from_subject
-            elif not gap_id:
-                # gap_id empty — fill from subject silently
-                gap_id = _gap_from_subject
-                msg["gap_id"] = _gap_from_subject
+        _valid_cands = [c for c in _gap_candidates if _gap_id_canon_re.fullmatch(c)]  # v7.121
+        if _valid_cands:
+            if gap_id in _valid_cands:
+                pass  # v7.121: envelope gap_id confirmed in subject candidates -- no mutation
+            elif gap_id:
+                print(f'[v7.95 gap-id-sanitizer] WARN mutation-detected subject="{subject[:80]}" parsed.gap_id="{gap_id}" -> overriding to "{_valid_cands[0]}"', flush=True)
+                gap_id = _valid_cands[0]
+                msg["gap_id"] = _valid_cands[0]
+            else:
+                # gap_id empty -- fill from subject silently
+                gap_id = _valid_cands[0]
+                msg["gap_id"] = _valid_cands[0]
     except Exception as _se:
         print(f"[v7.95 gap-id-sanitizer] error: {type(_se).__name__}: {_se}", flush=True)
 
