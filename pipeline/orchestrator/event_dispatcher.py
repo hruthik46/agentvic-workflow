@@ -2943,21 +2943,16 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
             except Exception as _v7232_e:
                 print(f"[dispatcher] v7.23.2 routing check failed: {_v7232_e}")
             # v7.22-C: explicitly persist iteration to state.json (was getting reset by [COMPLETE] handler)
-            # v7.103-C: gate the write behind _GAP_ID_RE — prevents invalid gap_ids (e.g. "none")
-            # from entering active_gaps and causing infinite probe/stall-check loops.
-            if not _GAP_ID_RE.match(gap_id or ""):
-                print(f"[dispatcher] v7.103-C SKIP state.json write for invalid gap_id={gap_id!r}")
-            else:
-                try:
-                    _v722c_state_path = Path("/var/lib/karios/orchestrator/state.json")
-                    _v722c_state = json.loads(_v722c_state_path.read_text())
-                    _v722c_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["iteration"] = next_iter
-                    _v722c_state["active_gaps"][gap_id]["phase"] = "3-coding"
-                    _v722c_state["active_gaps"][gap_id]["last_rating"] = rating
-                    _v722c_state_path.write_text(json.dumps(_v722c_state, indent=2))
-                    print(f"[dispatcher] v7.22-C persisted iter={next_iter} to state.json for {gap_id}")
-                except Exception as _v722c_e:
-                    print(f"[dispatcher] v7.22-C state persist failed: {_v722c_e}")
+            try:
+                _v722c_state_path = Path("/var/lib/karios/orchestrator/state.json")
+                _v722c_state = json.loads(_v722c_state_path.read_text())
+                _v722c_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["iteration"] = next_iter
+                _v722c_state["active_gaps"][gap_id]["phase"] = "3-coding"
+                _v722c_state["active_gaps"][gap_id]["last_rating"] = rating
+                _v722c_state_path.write_text(json.dumps(_v722c_state, indent=2))
+                print(f"[dispatcher] v7.22-C persisted iter={next_iter} to state.json for {gap_id}")
+            except Exception as _v722c_e:
+                print(f"[dispatcher] v7.22-C state persist failed: {_v722c_e}")
             # v7.15: dispatch BACKEND for code revise (not devops) — bugs need code fixes
             # v7.34.1: ALWAYS use format_critical_issues_for_revise (v7.32 SWE-Bench-style)
             _issues_str = format_critical_issues_for_revise(critical_issues, kind="code")
