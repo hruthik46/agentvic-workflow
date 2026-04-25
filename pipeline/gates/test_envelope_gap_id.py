@@ -696,6 +696,9 @@ def run_researchcomplete_fixtures(fixtures_dir, gap_re, dispatcher_path):
 PRODDEPLOYED_BEGIN_MARKER = 'R-3-GATE: proddeployed-gid-resolve-begin'
 PRODDEPLOYED_END_MARKER = 'R-3-GATE: proddeployed-gid-resolve-end'
 
+ARCHCOMPLETE_BEGIN_MARKER = 'R-3-GATE: archcomplete-gid-resolve-begin'
+ARCHCOMPLETE_END_MARKER = 'R-3-GATE: archcomplete-gid-resolve-end'
+
 
 def extract_proddeployed_resolver(source_path):
     """Extract the [PROD-DEPLOYED] handler gid-resolution block delimited by
@@ -766,6 +769,79 @@ def run_proddeployed_fixtures(fixtures_dir, gap_re, dispatcher_path):
     return passes, fails
 
 
+
+def extract_archcomplete_resolver(source_path):
+    """Extract the [ARCH-COMPLETE] handler gid-resolution block delimited by
+    R-3-GATE markers (archcomplete-gid-resolve-begin/-end) from the live dispatcher
+    and return Python source for a callable
+    _archcomplete_resolve(tokens, gap_id, _GAP_ID_RE) -> gid.
+    The block is at 12-space indent inside parse_message's [ARCH-COMPLETE] handler
+    (inside if len(parts) > 1:); dedent 12->4 so it sits inside our wrapper function.
+    Mirrors extract_archreviewed_resolver."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if ARCHCOMPLETE_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif ARCHCOMPLETE_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE archcomplete markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('            '):  # 12 spaces
+            dedented.append('    ' + ln[12:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError('unexpected indent in archcomplete block: {!r}'.format(ln))
+    NL = chr(10)
+    header = 'def _archcomplete_resolve(tokens, gap_id, _GAP_ID_RE):' + NL
+    footer = NL + '    return gid' + NL
+    return header + NL.join(dedented) + footer
+
+
+def run_archcomplete_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run archcomplete_*.json fixtures through the extracted [ARCH-COMPLETE] resolver.
+    Each fixture input has subject/gap_id; expected has gid. The harness pre-computes
+    tokens from subject (split on ']', strip, split) so the resolver has its required
+    parameter. Mirrors run_archreviewed_fixtures; uses archcomplete-gid-resolve markers."""
+    import tempfile, runpy, json as _json, os as _os
+    wrapper_src = extract_archcomplete_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        _os.unlink(tf_path)
+    resolver = ns['_archcomplete_resolve']
+    passes, fails = 0, 0
+    for fname in sorted(_os.listdir(fixtures_dir)):
+        if not (fname.startswith('archcomplete_') and fname.endswith('.json')):
+            continue
+        fpath = _os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = _json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        subject = inp.get('subject', '')
+        remaining = subject.split(']')[1].strip() if ']' in subject else subject
+        tokens = remaining.split()
+        got = resolver(tokens, inp.get('gap_id'), gap_re)
+        exp_gid = expected.get('gid')
+        desc = fixture.get('description', '')[:50]
+        if got == exp_gid:
+            print('  OK   {} ({}) -> gid={!r}'.format(fname, desc, got))
+            passes += 1
+        else:
+            print('  FAIL {}: gid: got {!r}, expected {!r}'.format(fname, got, exp_gid))
+            fails += 1
+    return passes, fails
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -798,7 +874,7 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_', 'researchcomplete_', 'proddeployed_')):
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_', 'researchcomplete_', 'proddeployed_', 'archcomplete_')):
             continue  # handler-path + file-inbox + apisync + e2eresults + complete fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
@@ -908,6 +984,15 @@ def main():
     pd_pass, pd_fail = run_proddeployed_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += pd_pass
     fails += pd_fail
+
+    # R-3 Theme 1 session #29 coverage: [ARCH-COMPLETE]/[ARCHITECTURE-COMPLETE] handler gid-resolution.
+    # Exercises the archcomplete-gid-resolve-begin/-end block against archcomplete_*.json
+    # fixtures. Backs pre-work for v7.104-D handle_arch_complete() call site: confirms
+    # envelope-first branch fires when envelope is present, and subject-parse fallback
+    # fires when envelope is absent. Iteration token follows gid in subject.
+    ac_pass, ac_fail = run_archcomplete_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += ac_pass
+    fails += ac_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

@@ -1,0 +1,10 @@
+{
+  "description": "ARCH-COMPLETE: envelope gap_id present and valid; subject has different token. gid = envelope value.",
+  "input": {
+    "subject": "[ARCH-COMPLETE] ARCH-IT-WRONG iteration 3",
+    "gap_id": "ARCH-IT-401"
+  },
+  "expected": {
+    "gid": "ARCH-IT-401"
+  }
+}

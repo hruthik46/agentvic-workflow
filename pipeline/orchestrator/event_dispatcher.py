@@ -4016,7 +4016,16 @@ def parse_message(msg_id: str, data: dict):
         if len(parts) > 1:
             remaining = parts[1].strip()
             tokens = remaining.split()
-            gid = tokens[0]
+            # R-3-GATE: archcomplete-gid-resolve-begin
+            if gap_id and _GAP_ID_RE.match(gap_id):
+                gid = gap_id
+            else:
+                gid = tokens[0]
+            # R-3-GATE: archcomplete-gid-resolve-end
+            if not _GAP_ID_RE.match(gid or ""):
+                print(f"[dispatcher] [ARCH-COMPLETE] drop: invalid gid {gid!r} in subject={subject!r}")
+                return
+            # archcomplete-gid-enforce
             iter_token = "iteration"
             if iter_token in tokens:
                 iter_idx = tokens.index(iter_token)
