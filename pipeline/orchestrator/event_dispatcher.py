@@ -5145,8 +5145,6 @@ def check_stalled_gaps():
     }
     stalled = []
     for gid, ge in state.get("active_gaps", {}).items():
-        if not _GAP_ID_RE.match(gid or ""):  # v7.103-B: reject invalid gap_ids before load_gap
-            continue
         # v7.8: skip gaps marked completed/closed/cancelled in state.json — dispatcher should NOT
         # nudge them. ARCH-IT-016 cost ~9 hours of telegram noise because this filter was missing.
         if ge.get("state") in ("completed", "closed", "cancelled", "escalated", "escalated_v792", "paused"):  # v7.97 H1: include v792 sentinel; v7.116-E2: paused must not be nudged
