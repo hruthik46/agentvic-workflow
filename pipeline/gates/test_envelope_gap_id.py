@@ -693,6 +693,79 @@ def run_researchcomplete_fixtures(fixtures_dir, gap_re, dispatcher_path):
             fails += 1
     return passes, fails
 
+PRODDEPLOYED_BEGIN_MARKER = 'R-3-GATE: proddeployed-gid-resolve-begin'
+PRODDEPLOYED_END_MARKER = 'R-3-GATE: proddeployed-gid-resolve-end'
+
+
+def extract_proddeployed_resolver(source_path):
+    """Extract the [PROD-DEPLOYED] handler gid-resolution block delimited by
+    R-3-GATE markers (proddeployed-gid-resolve-begin/-end) from the live dispatcher
+    and return Python source for a callable
+    _proddeployed_resolve(subject, gap_id, _GAP_ID_RE) -> gid.
+    The block is at 8-space indent inside parse_message's [PROD-DEPLOYED] handler;
+    dedent 8->4 so it sits inside our wrapper function. Mirrors
+    extract_researchcomplete_resolver."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if PRODDEPLOYED_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif PRODDEPLOYED_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE proddeployed markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('        '):  # 8 spaces
+            dedented.append('    ' + ln[8:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError('unexpected indent in proddeployed block: {!r}'.format(ln))
+    NL = chr(10)
+    header = 'def _proddeployed_resolve(subject, gap_id, _GAP_ID_RE):' + NL
+    footer = NL + '    return gid' + NL
+    return header + NL.join(dedented) + footer
+
+
+def run_proddeployed_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run proddeployed_*.json fixtures through the extracted [PROD-DEPLOYED] resolver.
+    Each fixture input has subject/gap_id; expected has gid. Mirrors
+    run_researchcomplete_fixtures; uses proddeployed-gid-resolve markers."""
+    import tempfile, runpy, json as _json, os as _os
+    wrapper_src = extract_proddeployed_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        _os.unlink(tf_path)
+    resolver = ns['_proddeployed_resolve']
+    passes, fails = 0, 0
+    for fname in sorted(_os.listdir(fixtures_dir)):
+        if not (fname.startswith('proddeployed_') and fname.endswith('.json')):
+            continue
+        fpath = _os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = _json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        got = resolver(inp.get('subject', ''), inp.get('gap_id'), gap_re)
+        exp_gid = expected.get('gid')
+        desc = fixture.get('description', '')[:50]
+        if got == exp_gid:
+            print('  OK   {} ({}) -> gid={!r}'.format(fname, desc, got))
+            passes += 1
+        else:
+            print('  FAIL {}: gid: got {!r}, expected {!r}'.format(fname, got, exp_gid))
+            fails += 1
+    return passes, fails
+
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -725,7 +798,7 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_', 'researchcomplete_')):
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_', 'researchcomplete_', 'proddeployed_')):
             continue  # handler-path + file-inbox + apisync + e2eresults + complete fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
@@ -823,6 +896,18 @@ def main():
     rc_pass, rc_fail = run_researchcomplete_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += rc_pass
     fails += rc_fail
+
+    # R-3 Theme 1 session #28 coverage: [PROD-DEPLOYED] handler gid-resolution.
+    # Exercises the proddeployed-gid-resolve-begin/-end block against proddeployed_*.json
+    # fixtures. Backs pre-work for v7.104-D handle_production_deployed() call site:
+    # confirms envelope-first branch fires when envelope is present, and subject-parse
+    # fallback fires when envelope is absent. All 3 aliases ([PROD-DEPLOYED],
+    # [DELIVERED-PROD], [PRODUCTION-DEPLOYED]) share one extraction path (R-3-GATE wraps
+    # the single shared gid assignment). notify_phase_transition uses _gid_n (separate
+    # extraction, out of scope for this gate).
+    pd_pass, pd_fail = run_proddeployed_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += pd_pass
+    fails += pd_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

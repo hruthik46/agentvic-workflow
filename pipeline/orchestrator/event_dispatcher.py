@@ -5068,9 +5068,18 @@ def parse_message(msg_id: str, data: dict):
                                     "PROD-DEPLOYED", summary=body[:140])
         except Exception:
             pass
-        # v7.74: use whitespace split — colon in body was grabbing description into gid
-        _pd_rest = subject.split("]")[1].strip() if "]" in subject else subject
-        gid = _pd_rest.split()[0] if _pd_rest else ""
+        # R-3-GATE: proddeployed-gid-resolve-begin
+        if gap_id and _GAP_ID_RE.match(gap_id):
+            gid = gap_id
+        else:
+            # v7.74: use whitespace split — colon in body was grabbing description into gid
+            _pd_rest = subject.split("]")[1].strip() if "]" in subject else subject
+            gid = _pd_rest.split()[0] if _pd_rest else ""
+        # R-3-GATE: proddeployed-gid-resolve-end
+        if not _GAP_ID_RE.match(gid or ""):
+            print(f"[dispatcher] [PROD-DEPLOYED] drop: invalid gid {gid!r} in subject={subject!r}")
+            return
+        # proddeployed-gid-enforce
         handle_production_deployed(gid, body=body, trace_id=trace_id)
         return
 

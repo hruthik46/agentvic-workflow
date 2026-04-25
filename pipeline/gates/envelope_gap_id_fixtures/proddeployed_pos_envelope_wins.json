@@ -1,0 +1,10 @@
+{
+  "description": "PROD-DEPLOYED: envelope gap_id present and valid; subject has different token. gid = envelope value.",
+  "input": {
+    "subject": "[PROD-DEPLOYED] DEVOPS-IT-WRONG",
+    "gap_id": "DEVOPS-IT-301"
+  },
+  "expected": {
+    "gid": "DEVOPS-IT-301"
+  }
+}
