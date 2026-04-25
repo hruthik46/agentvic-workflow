@@ -4652,9 +4652,14 @@ def parse_message(msg_id: str, data: dict):
 
     # ── API sync confirmation ─────────────────────────────────────────────
     if subject.startswith("[API-SYNC]"):
-        # v7.73 FIX: extract first whitespace-token after "]". Old colon-split included description text as gid.
-        _apisync_rest = subject.split("]")[1].strip() if "]" in subject else subject
-        gid = _apisync_rest.split()[0] if _apisync_rest else ""
+        # R-3-GATE: apisync-gid-resolve-begin
+        if gap_id and _GAP_ID_RE.match(gap_id):
+            gid = gap_id
+        else:
+            # v7.73: extract first whitespace-token after "]". Old colon-split included description text as gid.
+            _apisync_rest = subject.split("]")[1].strip() if "]" in subject else subject
+            gid = _apisync_rest.split()[0] if _apisync_rest else ""
+        # R-3-GATE: apisync-gid-resolve-end
         agent = sender
         gap_data = load_gap(gid)
         # v7.64: atomic read-modify-write to avoid race when both agents confirm simultaneously

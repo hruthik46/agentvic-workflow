@@ -1,0 +1,11 @@
+{
+  "description": "Envelope absent (gap_id=null). Subject-parse fallback must still resolve correct gid.",
+  "input": {
+    "subject": "[API-SYNC] ARCH-IT-055 — confirm API alignment before deploy",
+    "body": "",
+    "gap_id": null
+  },
+  "expected": {
+    "gid": "ARCH-IT-055"
+  }
+}

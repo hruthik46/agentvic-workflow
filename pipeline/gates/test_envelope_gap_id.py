@@ -321,6 +321,79 @@ def run_handler_fixtures(fixtures_dir, gap_re, dispatcher_path):
     return passes, fails
 
 
+APISYNC_BEGIN_MARKER = 'R-3-GATE: apisync-gid-resolve-begin'
+APISYNC_END_MARKER = 'R-3-GATE: apisync-gid-resolve-end'
+
+
+def extract_apisync_resolver(source_path):
+    """Extract the [API-SYNC] handler gid-resolution block delimited by
+    R-3-GATE markers (apisync-gid-resolve-begin/-end) from the live dispatcher
+    and return Python source for a callable
+    _apisync_resolve(subject, body, gap_id, _GAP_ID_RE) -> gid.
+    The block is at 8-space indent inside parse_message's [API-SYNC] handler;
+    dedent 8->4 so it sits inside our wrapper function. Mirrors
+    extract_handler_resolver."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if APISYNC_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif APISYNC_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE apisync markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('        '):
+            dedented.append('    ' + ln[8:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError(f'unexpected indent in apisync block: {ln!r}')
+    return (
+        'def _apisync_resolve(subject, body, gap_id, _GAP_ID_RE):\n'
+        + '\n'.join(dedented)
+        + '\n    return gid\n'
+    )
+
+
+def run_apisync_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run apisync_*.json fixtures through the extracted [API-SYNC] resolver.
+    Each fixture input has subject/body/gap_id; expected has gid. Mirrors
+    run_handler_fixtures; uses apisync-gid-resolve-begin/-end markers."""
+    import tempfile, runpy
+    wrapper_src = extract_apisync_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        os.unlink(tf_path)
+    resolver = ns['_apisync_resolve']
+
+    passes, fails = 0, 0
+    for fname in sorted(os.listdir(fixtures_dir)):
+        if not (fname.startswith('apisync_') and fname.endswith('.json')):
+            continue
+        fpath = os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        got = resolver(inp.get('subject', ''), inp.get('body', ''), inp.get('gap_id'), gap_re)
+        if got == expected.get('gid'):
+            print(f'  OK   {fname} ({fixture.get("description", "")[:50]}) -> gid={got!r}')
+            passes += 1
+        else:
+            print(f'  FAIL {fname}: gid: got {got!r}, expected {expected.get("gid")!r}')
+            fails += 1
+    return passes, fails
+
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -353,8 +426,8 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_')):
-            continue  # handler-path + file-inbox fixtures run via their own extractors below
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_')):
+            continue  # handler-path + file-inbox + apisync fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
             fixture = json.load(f)
@@ -406,6 +479,15 @@ def main():
     ri_pass, ri_fail = run_redisinbox_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += ri_pass
     fails += ri_fail
+
+    # R-3 Theme 1 session #11 coverage: [API-SYNC] handler gid-resolution.
+    # Exercises the apisync-gid-resolve-begin/-end block against apisync_*.json
+    # fixtures. Backs pre-work for v7.73 retirement: confirms envelope-first
+    # branch fires when envelope is present, and subject-parse fallback fires
+    # when envelope is absent.
+    as_pass, as_fail = run_apisync_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += as_pass
+    fails += as_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

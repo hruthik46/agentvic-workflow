@@ -1,0 +1,11 @@
+{
+  "description": "Envelope carries canonical gap_id; subject prose differs. Handler must use envelope.",
+  "input": {
+    "subject": "[API-SYNC] WRONG-GID — confirm API alignment before deploy",
+    "body": "",
+    "gap_id": "ARCH-IT-055"
+  },
+  "expected": {
+    "gid": "ARCH-IT-055"
+  }
+}
