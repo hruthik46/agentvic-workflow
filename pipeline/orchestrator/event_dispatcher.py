@@ -3467,9 +3467,6 @@ def _update_active_gap_state(gap_id: str, phase: str = None, state: str = None, 
     (i.e. a human resolved the gap), DEL v792:rejects:{gap_id} and v792:escalated:{gap_id}
     so future empty-completion guards are not pre-poisoned by stale counters.
     """
-    if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-D: central guard
-        print(f"[dispatcher] v7.104-D SKIP _update_active_gap_state for invalid gap_id={gap_id!r}")
-        return
     try:
         st = load_state() or {}
         ag = st.setdefault('active_gaps', {})
