@@ -2675,9 +2675,8 @@ def handle_e2e_results(gap_id: str, iteration: int, rating: int,
             # Production already deployed -- tests passed -- mark complete directly
             print(f"[dispatcher] v7.79: {gap_id} tests PASSED ({rating}/10), prod already deployed -- marking complete")
             try:
-                if _GAP_ID_RE.match(gap_id or ""):  # v7.104-B
-                    _v779_re_state["active_gaps"][gap_id]["phase4_tests_done"] = True
-                    save_state(_v779_re_state)
+                _v779_re_state["active_gaps"][gap_id]["phase4_tests_done"] = True
+                save_state(_v779_re_state)
             except Exception:
                 pass
             update_gap_phase(gap_id, "completed", completed_at=current_ts(), trace_id=tid)
