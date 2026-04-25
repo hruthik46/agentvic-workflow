@@ -1,11 +1,11 @@
 {
-  "description": "Envelope absent (gap_id=null). Subject-parse fallback must still resolve correct gid.",
+  "description": "Envelope absent (gap_id=null). v7.73 subject-parse retired (session-12); handler yields gid=\"\" and load_gap returns {} (v7.74 backstop). Documents post-retirement behavior.",
   "input": {
-    "subject": "[API-SYNC] ARCH-IT-055 — confirm API alignment before deploy",
+    "subject": "[API-SYNC] ARCH-IT-055 \u2014 confirm API alignment before deploy",
     "body": "",
     "gap_id": null
   },
   "expected": {
-    "gid": "ARCH-IT-055"
+    "gid": ""
   }
 }
