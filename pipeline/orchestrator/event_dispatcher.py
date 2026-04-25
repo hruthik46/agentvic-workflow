@@ -4167,6 +4167,10 @@ def parse_message(msg_id: str, data: dict):
             _extracted_gap_id = gap_id_match.group(1).rstrip(";,. ") if gap_id_match else None
         gap_id = _extracted_gap_id or gap_id  # v7.81b: fall back to parse_message gap_id
         # R-3-GATE: complete-gid-resolve-end
+        # R-3-GATE: complete-gid-enforce — reject invalid gap_id before handle_e2e_results()
+        if not _GAP_ID_RE.match(gap_id or ""):
+            print(f"[dispatcher] [[COMPLETE]] drop: invalid gap_id {gap_id!r} post-R-3-GATE in subject={subject!r}")
+            return
         phase_match = re.search(r"phase[=:\s]+([\w.-]+)", (body or "") + " " + (subject or ""))
         coding_complete_match = re.search(r"coding_complete:\s*(True|False)", body or "")
         iteration_match = re.search(r"iteration:\s*(\d+)", body or "")
@@ -4864,6 +4868,10 @@ def parse_message(msg_id: str, data: dict):
             else:
                 gid = tokens[0]
             # R-3-GATE: e2eresults-gid-resolve-end
+        # R-3-GATE: e2eresults-gid-enforce — reject invalid gid before handle_e2e_results()
+        if not _GAP_ID_RE.match(gid or ""):
+            print(f"[dispatcher] [[E2E-RESULTS]] drop: invalid gid {gid!r} post-R-3-GATE in subject={subject!r}")
+            return
         # v7.28-4: safe IndexError + try/except on int()
         _iter_token = None
         try:
