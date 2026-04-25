@@ -1,0 +1,10 @@
+{
+  "description": "RESEARCH-COMPLETE: envelope gap_id null; subject token is valid gap_id. gid = subject-parsed token.",
+  "input": {
+    "subject": "[RESEARCH-COMPLETE] ARCH-IT-202",
+    "gap_id": null
+  },
+  "expected": {
+    "gid": "ARCH-IT-202"
+  }
+}

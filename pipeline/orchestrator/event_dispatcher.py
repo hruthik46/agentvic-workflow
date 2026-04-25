@@ -3997,7 +3997,16 @@ def parse_message(msg_id: str, data: dict):
     if subject.startswith("[RESEARCH-COMPLETE]"):
         # v7.74: use whitespace split — colon in body was grabbing description into gid
         parts = subject.split("]")
-        gid = parts[1].strip().split()[0] if len(parts) > 1 else subject
+        # R-3-GATE: researchcomplete-gid-resolve-begin
+        if gap_id and _GAP_ID_RE.match(gap_id):
+            gid = gap_id
+        else:
+            gid = parts[1].strip().split()[0] if len(parts) > 1 else subject
+        # R-3-GATE: researchcomplete-gid-resolve-end
+        if not _GAP_ID_RE.match(gid or ""):
+            print(f"[dispatcher] [RESEARCH-COMPLETE] drop: invalid gid {gid!r} in subject={subject!r}")
+            return
+        # researchcomplete-gid-enforce
         handle_research_complete(gid, body, trace_id=trace_id)
         return
 

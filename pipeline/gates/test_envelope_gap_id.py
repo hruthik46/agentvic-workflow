@@ -616,6 +616,83 @@ def run_archreviewed_fixtures(fixtures_dir, gap_re, dispatcher_path):
             fails += 1
     return passes, fails
 
+
+RESEARCHCOMPLETE_BEGIN_MARKER = 'R-3-GATE: researchcomplete-gid-resolve-begin'
+RESEARCHCOMPLETE_END_MARKER = 'R-3-GATE: researchcomplete-gid-resolve-end'
+
+
+def extract_researchcomplete_resolver(source_path):
+    """Extract the [RESEARCH-COMPLETE] handler gid-resolution block delimited by
+    R-3-GATE markers (researchcomplete-gid-resolve-begin/-end) from the live dispatcher
+    and return Python source for a callable
+    _researchcomplete_resolve(subject, parts, gap_id, _GAP_ID_RE) -> gid.
+    The block is at 8-space indent inside parse_message's [RESEARCH-COMPLETE] handler;
+    dedent 8->4 so it sits inside our wrapper function. parts is pre-computed from
+    subject.split(']') by the caller, as in the dispatcher. Mirrors
+    extract_apisync_resolver."""
+    with open(source_path) as f:
+        lines = f.read().splitlines()
+    begin_idx = end_idx = None
+    for i, line in enumerate(lines):
+        if RESEARCHCOMPLETE_BEGIN_MARKER in line:
+            begin_idx = i + 1
+        elif RESEARCHCOMPLETE_END_MARKER in line:
+            end_idx = i
+            break
+    if begin_idx is None or end_idx is None:
+        raise RuntimeError('R-3-GATE researchcomplete markers not found in dispatcher (refactor without updating gate?)')
+    body_lines = lines[begin_idx:end_idx]
+    dedented = []
+    for ln in body_lines:
+        if ln.startswith('        '):  # 8 spaces
+            dedented.append('    ' + ln[8:])
+        elif ln.strip() == '':
+            dedented.append(ln)
+        else:
+            raise RuntimeError('unexpected indent in researchcomplete block: {!r}'.format(ln))
+    NL = chr(10)
+    header = 'def _researchcomplete_resolve(subject, parts, gap_id, _GAP_ID_RE):' + NL
+    footer = NL + '    return gid' + NL
+    return header + NL.join(dedented) + footer
+
+
+def run_researchcomplete_fixtures(fixtures_dir, gap_re, dispatcher_path):
+    """Run researchcomplete_*.json fixtures through the extracted [RESEARCH-COMPLETE]
+    resolver. Each fixture input has subject/gap_id; expected has gid. The harness
+    pre-computes parts = subject.split(']') so the resolver has its required parameter.
+    Mirrors run_archreviewed_fixtures; uses researchcomplete-gid-resolve markers."""
+    import tempfile, runpy, json as _json, os as _os
+    wrapper_src = extract_researchcomplete_resolver(dispatcher_path)
+    with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as tf:
+        tf.write(wrapper_src)
+        tf_path = tf.name
+    try:
+        ns = runpy.run_path(tf_path)
+    finally:
+        _os.unlink(tf_path)
+    resolver = ns['_researchcomplete_resolve']
+    passes, fails = 0, 0
+    for fname in sorted(_os.listdir(fixtures_dir)):
+        if not (fname.startswith('researchcomplete_') and fname.endswith('.json')):
+            continue
+        fpath = _os.path.join(fixtures_dir, fname)
+        with open(fpath) as f:
+            fixture = _json.load(f)
+        inp = fixture['input']
+        expected = fixture['expected']
+        subject = inp.get('subject', '')
+        parts = subject.split(']')
+        got = resolver(subject, parts, inp.get('gap_id'), gap_re)
+        exp_gid = expected.get('gid')
+        desc = fixture.get('description', '')[:50]
+        if got == exp_gid:
+            print('  OK   {} ({}) -> gid={!r}'.format(fname, desc, got))
+            passes += 1
+        else:
+            print('  FAIL {}: gid: got {!r}, expected {!r}'.format(fname, got, exp_gid))
+            fails += 1
+    return passes, fails
+
 def main():
     if not os.path.exists(DISPATCHER):
         print(f'FATAL: dispatcher not found at {DISPATCHER}')
@@ -648,7 +725,7 @@ def main():
     for fname in sorted(os.listdir(FIXTURES_DIR)):
         if not fname.endswith('.json'):
             continue
-        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_')):
+        if fname.startswith(('handler_', 'fileinbox_', 'redisinbox_', 'apisync_', 'e2eresults_', 'complete_', 'archreviewed_', 'researchcomplete_')):
             continue  # handler-path + file-inbox + apisync + e2eresults + complete fixtures run via their own extractors below
         fpath = os.path.join(FIXTURES_DIR, fname)
         with open(fpath) as f:
@@ -737,6 +814,15 @@ def main():
     ar_pass, ar_fail = run_archreviewed_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
     passes += ar_pass
     fails += ar_fail
+
+    # R-3 Theme 1 session #27 coverage: [RESEARCH-COMPLETE] handler gid-resolution.
+    # Exercises the researchcomplete-gid-resolve-begin/-end block against
+    # researchcomplete_*.json fixtures. Backs pre-work for v7.104-D
+    # handle_research_complete() call site: confirms envelope-first branch fires when
+    # envelope is present, and subject-parse fallback fires when envelope is absent.
+    rc_pass, rc_fail = run_researchcomplete_fixtures(FIXTURES_DIR, gap_re, DISPATCHER)
+    passes += rc_pass
+    fails += rc_fail
 
     pm_node = find_parse_message(DISPATCHER)
     if pm_node is None:

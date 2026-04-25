@@ -1,0 +1,10 @@
+{
+  "description": "RESEARCH-COMPLETE: envelope gap_id present and valid; subject has different token. gid = envelope value.",
+  "input": {
+    "subject": "[RESEARCH-COMPLETE] ARCH-IT-WRONG",
+    "gap_id": "ARCH-IT-201"
+  },
+  "expected": {
+    "gid": "ARCH-IT-201"
+  }
+}
