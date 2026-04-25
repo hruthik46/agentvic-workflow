@@ -5161,6 +5161,9 @@ def parse_message(msg_id: str, data: dict):
     _trc_m = re.search(r"(ARCH-IT-\d+|REQ-\d+|TEST-FLOW-[A-Z0-9]+)\s+iteration\s+(\d+)", subject or "", re.IGNORECASE)
     if _trc_m and subject and any(k in subject.upper() for k in ("TEST", "SCORE", "E2E", "BLIND")):
         _trc_gid = _trc_m.group(1)
+        if not _GAP_ID_RE.match(_trc_gid or ""):  # v7.74-catch-enforce
+            print(f"[dispatcher] [v7.74-catch] drop: invalid _trc_gid {_trc_gid!r} in subject={subject!r}")
+            return
         _trc_iter = int(_trc_m.group(2))
         _trc_sm = re.search(r"SCORE:\s*(\d+)/(\d+)", subject, re.IGNORECASE)
         _trc_rating = int(_trc_sm.group(1)) if _trc_sm else 7
