@@ -1998,19 +1998,16 @@ def handle_arch_review(gap_id: str, iteration: int, rating: int,
     # v7.89c: raised from 10 to 12 to match arch max_iter=11 (was prematurely hard-escalating)
     _arch_k_max = _pipeline_cfg().get("arch_k_max", 15)
     if iteration >= _arch_k_max:
-        if not _GAP_ID_RE.match(gap_id or ""):  # v7.104-A: never persist invalid gap_ids
-            print(f"[dispatcher] v7.104-A SKIP v7.86 escalate invalid gap_id={gap_id!r}")
-        else:
-            try:
-                _v786_state_path = Path("/var/lib/karios/orchestrator/state.json")
-                _v786_state = json.loads(_v786_state_path.read_text())
-                _v786_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
-                _v786_state["active_gaps"][gap_id]["iteration"] = iteration
-                _v786_state["active_gaps"][gap_id]["phase"] = "escalated"
-                _v786_state_path.write_text(json.dumps(_v786_state, indent=2))
-                print(f"[dispatcher] v7.86 ARCH HARD ESCALATE {gap_id} iter={iteration}/{_arch_k_max} — state frozen")
-            except Exception as _v786_e:
-                print(f"[dispatcher] v7.86 state freeze failed: {_v786_e}")
+        try:
+            _v786_state_path = Path("/var/lib/karios/orchestrator/state.json")
+            _v786_state = json.loads(_v786_state_path.read_text())
+            _v786_state.setdefault("active_gaps", {}).setdefault(gap_id, {})["state"] = "escalated"
+            _v786_state["active_gaps"][gap_id]["iteration"] = iteration
+            _v786_state["active_gaps"][gap_id]["phase"] = "escalated"
+            _v786_state_path.write_text(json.dumps(_v786_state, indent=2))
+            print(f"[dispatcher] v7.86 ARCH HARD ESCALATE {gap_id} iter={iteration}/{_arch_k_max} — state frozen")
+        except Exception as _v786_e:
+            print(f"[dispatcher] v7.86 state freeze failed: {_v786_e}")
         try:
             telegram_alert(f"🚨 *{gap_id}*: ARCH HARD ESCALATE — stuck at iteration {iteration}/{_arch_k_max}. Last rating: {rating}/10.")
         except Exception:
