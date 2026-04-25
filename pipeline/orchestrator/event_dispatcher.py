@@ -4446,35 +4446,6 @@ def parse_message(msg_id: str, data: dict):
                         print(f"[dispatcher] v7.18 normalizer inject failed: {_ie}")
                 else:
                     print(f"[dispatcher] COMPLETE handler: no transition for {gap_id} {phase} (current={current_phase}; normalized {n_phase}/{n_current})")
-        else:
-            # v7.65: try extracting gap_id from subject (file inbox sets gap_id=None)
-            import re as _v765_re
-            _v765_m = _v765_re.search(r"(ARCH-IT-[0-9]+|REQ-[0-9]+|GAP-[0-9A-Z]+)", subject or "")
-            if _v765_m:
-                gap_id = _v765_m.group(1)
-                print(f"[dispatcher] v7.65: extracted gap_id={gap_id} from subject for [COMPLETE] handler")
-                # Re-run transition logic with recovered gap_id
-                _v765_gap = load_gap(gap_id) or {}
-                _v765_phase = _v765_gap.get("phase", "")
-                _v765_state = _v765_gap.get("state", "active")
-                if _v765_state in ("completed", "closed", "cancelled"):
-                    print(f"[dispatcher] v7.65 DROP [COMPLETE] from {sender} for {gap_id}: state={_v765_state} (terminal)")
-                else:
-                    print(f"[dispatcher] v7.65 [COMPLETE] from {sender} for {gap_id} phase={_v765_phase} — recovered from subject, handling normally")
-                    # Dispatch back into subject handler with recovered gap_id
-                    import threading as _v765_t
-                    _v765_inj = {"from": sender, "message": (subject or "") + "\n" + (body or "")}
-                    try:
-                        from pathlib import Path as _v765_P
-                        import time as _v765_time, uuid as _v765_uuid
-                        _v765_inj_path = _v765_P("/var/lib/karios/agent-msg/inbox/orchestrator") / f"v765-recover-{int(_v765_time.time())}-{_v765_uuid.uuid4().hex[:6]}.json"
-                        import json as _v765_json
-                        _v765_inj_path.write_text(_v765_json.dumps({"from": sender, "message": (subject or "") + "\n" + (body or ""), "gap_id": gap_id, "trace_id": trace_id or "", "priority": "high"}))
-                        print(f"[dispatcher] v7.65: re-injected [COMPLETE] with gap_id={gap_id} for next loop")
-                    except Exception as _v765_e:
-                        print(f"[dispatcher] v7.65 re-inject failed: {_v765_e}")
-            else:
-                print(f"[dispatcher] ← [COMPLETE] but no gap_id in body: {body[:100]}")
         return
 
     # ── Coding complete / FAN-IN ──────────────────────────────────────────
