@@ -47,6 +47,7 @@ Re-ranking (v2):
 import asyncio
 import concurrent.futures
 import json
+import math
 import os
 import signal
 import time
@@ -199,9 +200,103 @@ _LF_POOL = concurrent.futures.ThreadPoolExecutor(
 _LF_TASKS: set = set()
 
 
+async def _embed_one(text: str, timeout_s: float) -> list:
+    """Embed a single text via Ollama. Reuses _http_post_json_sync on _HOT_POOL.
+
+    Same shape as embed_query() but without the 'query' field-name coupling, so
+    the score_pairs handler can batch arbitrary text without semantic confusion.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _do():
+        return _http_post_json_sync(
+            f"{OLLAMA_URL}/api/embeddings",
+            {"model": EMBED_MODEL, "prompt": text},
+            timeout=timeout_s,
+        )
+
+    data = await loop.run_in_executor(_HOT_POOL, _do)
+    return data["embedding"]
+
+
+def _cosine_clamped(a: list, b: list) -> float:
+    """Cosine similarity in [0,1]. Negative cosines clamp to 0; over-1 clamps to 1.
+
+    Robust whether nomic-embed-text returns L2-normalized vectors or not.
+    """
+    if len(a) != len(b) or not a:
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    cos = dot / (math.sqrt(na) * math.sqrt(nb))
+    if cos < 0.0:
+        return 0.0
+    if cos > 1.0:
+        return 1.0
+    return cos
+
+
+async def handle_score_pairs(req: dict) -> dict:
+    """Embed pairs of texts and return cosine similarity per pair.
+
+    R1 design: reuses existing Ollama nomic-embed-text via _embed_one on
+    _HOT_POOL. Batches the unique-text set so N pairs sharing texts cost the
+    number of distinct texts, not 2N, calls.
+    """
+    pairs = req.get("pairs")
+    if not isinstance(pairs, list) or not pairs:
+        return {"error": "'pairs' must be a non-empty list", "category": "bad_request"}
+    for p in pairs:
+        if not (isinstance(p, (list, tuple)) and len(p) == 2
+                and isinstance(p[0], str) and isinstance(p[1], str)):
+            return {"error": "each pair must be a 2-element list of strings",
+                    "category": "bad_request"}
+
+    try:
+        timeout_ms = int(req.get("timeout_ms", DEFAULT_TIMEOUT_MS))
+    except (TypeError, ValueError):
+        timeout_ms = DEFAULT_TIMEOUT_MS
+    timeout_ms = max(500, min(timeout_ms, 30000))
+    embed_timeout = max(0.5, min(timeout_ms / 1000.0 * 0.9, 8.0))
+
+    # Dedup texts preserving first-seen order
+    unique_texts = list(dict.fromkeys(t for pair in pairs for t in pair))
+
+    async with SEM:
+        t_embed = time.monotonic()
+        try:
+            vectors = await asyncio.wait_for(
+                asyncio.gather(*[_embed_one(t, embed_timeout) for t in unique_texts]),
+                timeout=embed_timeout * 2,
+            )
+        except asyncio.TimeoutError:
+            return {"error": f"embed timeout after {embed_timeout:.1f}s", "category": "timeout"}
+        except urllib.error.HTTPError as e:
+            return {"error": f"embed http {e.code}: {e.reason}", "category": "embed_failed"}
+        except Exception as e:
+            return {"error": f"embed failed: {type(e).__name__}: {e}", "category": "embed_failed"}
+        embed_ms = int((time.monotonic() - t_embed) * 1000)
+
+        emb_map = dict(zip(unique_texts, vectors))
+        t_score = time.monotonic()
+        scores = [_cosine_clamped(emb_map[a], emb_map[b]) for (a, b) in pairs]
+        score_ms = int((time.monotonic() - t_score) * 1000)
+
+    return {"scores": scores, "timing_ms": {"embed": embed_ms, "score": score_ms}}
+
+
 async def handle_request(req: dict) -> dict:
     if not isinstance(req, dict):
         return {"error": "request must be a JSON object", "category": "bad_request"}
+    if req.get("op") == "score_pairs":
+        return await handle_score_pairs(req)
     query = req.get("query", "")
     if not isinstance(query, str) or not query.strip():
         return {"error": "'query' field required (non-empty string)", "category": "bad_request"}
