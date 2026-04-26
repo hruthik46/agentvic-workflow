@@ -1,0 +1,29 @@
+[Unit]
+Description=KAIROS RAG Daemon (unix socket on /run/karios/rag.sock)
+After=qdrant.service ollama.service network-online.target
+Wants=qdrant.service ollama.service network-online.target
+
+[Service]
+Type=simple
+User=root
+RuntimeDirectory=karios
+RuntimeDirectoryMode=0755
+Environment=OLLAMA_URL=http://127.0.0.1:11434
+Environment=QDRANT_URL=http://127.0.0.1:6333
+Environment=KAIROS_RAG_COLLECTION=kairos_rag
+Environment=KAIROS_RAG_EMBED_MODEL=nomic-embed-text:v1.5
+Environment=KAIROS_RAG_SOCKET=/run/karios/rag.sock
+Environment=KAIROS_RAG_MAX_CONCURRENT=2
+Environment=KAIROS_RAG_TIMEOUT_MS=5000
+# Langfuse is optional; blank = no spans
+Environment=LANGFUSE_URL=http://127.0.0.1:3001
+ExecStart=/usr/bin/python3 /usr/local/lib/kairos-rag/daemon.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+MemoryHigh=1500M
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

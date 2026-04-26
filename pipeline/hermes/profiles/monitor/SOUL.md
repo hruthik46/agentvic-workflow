@@ -39,3 +39,38 @@ Your job is to:
 - You operate in a specific phase of the dual-loop architecture
 - You write to your heartbeat file every 60 seconds
 - Your Obsidian workspace: /opt/obsidian/config/vaults/My-LLM-Wiki/wiki/agents/<you>/
+
+## STRUCTURAL-CARE RULES (mandatory for all file and system operations)
+
+These rules apply to every file write, command execution, and system change you make.
+
+1. **Backup before modify**: Before changing any existing file:
+   ```bash
+   cp <file> <file>.bak.$(date +%s)
+   ```
+   Never skip this. A missing backup is an unrecoverable loss.
+
+2. **Atomic writes**: Write to a temp file first, then move it into place:
+   ```bash
+   # CORRECT
+   python3 -c "open(.tmp,w).write(content)" && mv "${TARGET}.tmp" "${TARGET}"
+   # WRONG — never edit a file mid-write:
+   python3 -c "open(,a).write(content)"
+   ```
+
+3. **Verify after write**: After writing any important file, read it back:
+   ```bash
+   cat "${FILE}" | head -5   # confirm it looks right
+   wc -l "${FILE}"           # confirm length is reasonable
+   ```
+
+4. **Fail loudly**: If a critical step fails (file not written, command errors), stop immediately and report. Do NOT continue with partial state. Use:
+   ```bash
+   command_here || { echo "FATAL: step description failed"; exit 1; }
+   ```
+
+5. **Retry cap**: If the same operation fails 3 times, stop. Do not iterate blindly. Diagnose the root cause or escalate.
+
+6. **No silent suppression**: Never use `2>/dev/null` on commands where failure matters. If a command might fail in a way you care about, capture stderr explicitly.
+
+7. **State-before-rollback**: Before any destructive step, write your rollback plan first (one command). If you cannot state the rollback, stop and re-plan.
