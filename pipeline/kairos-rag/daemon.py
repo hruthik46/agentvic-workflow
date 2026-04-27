@@ -266,6 +266,14 @@ _LF_POOL = concurrent.futures.ThreadPoolExecutor(
 
 _LF_TASKS: set = set()
 
+# Score-pairs embed cache (C2). Keyed on chunk text; value is the embedding list.
+# For an O(N^2) merge over N shards, each shard's chunks recur in (N-1) pairs;
+# this collapses ~N x re-embeds into a single Ollama call per unique chunk.
+# Race-on-cold-miss is acceptable (second writer overwrites first; size briefly
+# exceeds max until next eviction). No per-key lock by design.
+_EMBED_CACHE: dict = {}
+_EMBED_CACHE_MAX = int(os.environ.get("KAIROS_RAG_EMBED_CACHE_MAX", "10000"))
+
 
 async def _embed_one(text: str, timeout_s: float) -> list:
     """Embed a single text via Ollama. Reuses _http_post_json_sync on _HOT_POOL.
@@ -273,6 +281,9 @@ async def _embed_one(text: str, timeout_s: float) -> list:
     Same shape as embed_query() but without the 'query' field-name coupling, so
     the score_pairs handler can batch arbitrary text without semantic confusion.
     """
+    cached = _EMBED_CACHE.get(text)
+    if cached is not None:
+        return cached
     loop = asyncio.get_running_loop()
 
     def _do():
@@ -283,7 +294,11 @@ async def _embed_one(text: str, timeout_s: float) -> list:
         )
 
     data = await loop.run_in_executor(_HOT_POOL, _do)
-    return data["embedding"]
+    embedding = data["embedding"]
+    if len(_EMBED_CACHE) >= _EMBED_CACHE_MAX:
+        del _EMBED_CACHE[next(iter(_EMBED_CACHE))]
+    _EMBED_CACHE[text] = embedding
+    return embedding
 
 
 def _cosine_clamped(a: list, b: list) -> float:
