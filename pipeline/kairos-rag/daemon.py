@@ -557,7 +557,7 @@ async def main():
     except PermissionError:
         pass
 
-    server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
+    server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH, limit=8 * 1024 * 1024)
     try:
         os.chmod(SOCKET_PATH, 0o666)
     except Exception:
