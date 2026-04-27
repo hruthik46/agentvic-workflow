@@ -79,6 +79,16 @@ RERANK_DISABLED = os.environ.get("KAIROS_RAG_RERANK_DISABLED", "").lower() in ("
 CHUNK_MAX_CHARS = int(os.environ.get("KAIROS_RAG_CHUNK_MAX_CHARS", "2000"))
 CHUNK_OVERLAP   = int(os.environ.get("KAIROS_RAG_CHUNK_OVERLAP", "200"))
 
+# Dedup-side pre-filter: drop chunks whose stripped length is below this
+# threshold BEFORE max-pool reduction. Motivated by D2-tune finding that
+# header-only chunks (e.g. '## Key Technical Details\n\n\n', 27 chars) appear
+# verbatim across unrelated shards and dominate max-pool, collapsing the
+# similar/dissimilar gap (4 dissimilar pairs scored exactly 0.9921310257994065).
+# Retrieval has cross-encoder re-rank as a noise filter; dedup has nothing —
+# this is the dedup-side analogue (cf. ColBERT punctuation-token filtering).
+# Naming is dedup-specific; the indexer's chunkers are NOT modified.
+DEDUP_MIN_CHUNK_CHARS = int(os.environ.get("KAIROS_RAG_DEDUP_MIN_CHUNK_CHARS", "32"))
+
 
 # ---------------------------------------------------------------------------
 # Chunkers — VERBATIM copy from /usr/local/bin/kairos-rag-indexer (lines 124-156).
@@ -322,6 +332,14 @@ async def handle_score_pairs(req: dict) -> dict:
     text_chunks = {
         t: chunk_markdown(t, CHUNK_MAX_CHARS, CHUNK_OVERLAP) for t in unique_texts
     }
+    # D3: drop chunks whose stripped length is below DEDUP_MIN_CHUNK_CHARS
+    # before max-pool. Per-text fallback: if filtering removes ALL chunks for
+    # a given text (tiny shard whose only chunk is sub-threshold), keep the
+    # original chunk set FOR THAT TEXT ONLY rather than emit 0.0 / None.
+    for _t, _cs in list(text_chunks.items()):
+        _kept = [c for c in _cs if len(c.strip()) >= DEDUP_MIN_CHUNK_CHARS]
+        if _kept:
+            text_chunks[_t] = _kept
     # Flat chunk-level dedup across all texts.
     unique_chunks = list(dict.fromkeys(c for cs in text_chunks.values() for c in cs))
 
