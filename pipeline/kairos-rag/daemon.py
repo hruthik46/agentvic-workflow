@@ -331,7 +331,7 @@ async def handle_score_pairs(req: dict) -> dict:
     except (TypeError, ValueError):
         timeout_ms = DEFAULT_TIMEOUT_MS
     timeout_ms = max(500, min(timeout_ms, 30000))
-    embed_timeout = max(0.5, min(timeout_ms / 1000.0 * 0.9, 8.0))
+    embed_timeout = max(0.5, min(timeout_ms / 1000.0 * 0.9, 60.0))
 
     # Dedup texts preserving first-seen order, then chunk each text using the
     # same chunker the indexer uses (chunk_markdown — falls through to
