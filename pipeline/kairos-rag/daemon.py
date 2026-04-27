@@ -49,6 +49,7 @@ import concurrent.futures
 import json
 import math
 import os
+import re
 import signal
 import time
 import traceback
@@ -71,6 +72,53 @@ DEFAULT_TIMEOUT_MS = int(os.environ.get("KAIROS_RAG_TIMEOUT_MS", "5000"))
 RERANK_MODEL  = os.environ.get("KAIROS_RAG_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RETRIEVE_MULT = int(os.environ.get("KAIROS_RAG_RETRIEVE_MULT", "4"))  # retrieve Nx, return top_k
 RERANK_DISABLED = os.environ.get("KAIROS_RAG_RERANK_DISABLED", "").lower() in ("1", "true", "yes")
+
+# Chunking config — defaults match /etc/kairos-rag/corpus.yaml so dedup chunks
+# match the indexer's chunks at retrieval time. Env vars allow operations to
+# drift later if the indexer's corpus.yaml changes.
+CHUNK_MAX_CHARS = int(os.environ.get("KAIROS_RAG_CHUNK_MAX_CHARS", "2000"))
+CHUNK_OVERLAP   = int(os.environ.get("KAIROS_RAG_CHUNK_OVERLAP", "200"))
+
+
+# ---------------------------------------------------------------------------
+# Chunkers — VERBATIM copy from /usr/local/bin/kairos-rag-indexer (lines 124-156).
+# Source of truth is the indexer; keep in sync — drift here breaks the
+# indexer/dedup semantic match (chunk-level retrieval vs. chunk-level dedup).
+# Do not refactor or "improve" these.
+# ---------------------------------------------------------------------------
+
+def chunk_markdown(text, max_chars, overlap):
+    parts = re.split(r"(^#{1,6} .+?$)", text, flags=re.MULTILINE)
+    blocks, current = [], ""
+    for p in parts:
+        if re.match(r"^#{1,6} ", p or ""):
+            if current.strip():
+                blocks.append(current)
+            current = p + "\n"
+        else:
+            current += p or ""
+    if current.strip():
+        blocks.append(current)
+    out = []
+    for b in blocks:
+        if len(b) <= max_chars:
+            out.append(b)
+        else:
+            i = 0
+            while i < len(b):
+                out.append(b[i:i + max_chars])
+                i += max(1, max_chars - overlap)
+    return out
+
+
+def chunk_generic(text, max_chars, overlap):
+    if len(text) <= max_chars:
+        return [text]
+    out, i = [], 0
+    while i < len(text):
+        out.append(text[i:i + max_chars])
+        i += max(1, max_chars - overlap)
+    return out
 
 # ---------------------------------------------------------------------------
 # Cross-encoder re-ranker — lazy-loaded on first request
@@ -266,14 +314,22 @@ async def handle_score_pairs(req: dict) -> dict:
     timeout_ms = max(500, min(timeout_ms, 30000))
     embed_timeout = max(0.5, min(timeout_ms / 1000.0 * 0.9, 8.0))
 
-    # Dedup texts preserving first-seen order
+    # Dedup texts preserving first-seen order, then chunk each text using the
+    # same chunker the indexer uses (chunk_markdown — falls through to
+    # generic-style splitting on text without markdown headers). Embed at the
+    # chunk level so dedup similarity matches chunk-level retrieval similarity.
     unique_texts = list(dict.fromkeys(t for pair in pairs for t in pair))
+    text_chunks = {
+        t: chunk_markdown(t, CHUNK_MAX_CHARS, CHUNK_OVERLAP) for t in unique_texts
+    }
+    # Flat chunk-level dedup across all texts.
+    unique_chunks = list(dict.fromkeys(c for cs in text_chunks.values() for c in cs))
 
     async with SEM:
         t_embed = time.monotonic()
         try:
-            vectors = await asyncio.wait_for(
-                asyncio.gather(*[_embed_one(t, embed_timeout) for t in unique_texts]),
+            chunk_vectors = await asyncio.wait_for(
+                asyncio.gather(*[_embed_one(c, embed_timeout) for c in unique_chunks]),
                 timeout=embed_timeout * 2,
             )
         except asyncio.TimeoutError:
@@ -284,9 +340,28 @@ async def handle_score_pairs(req: dict) -> dict:
             return {"error": f"embed failed: {type(e).__name__}: {e}", "category": "embed_failed"}
         embed_ms = int((time.monotonic() - t_embed) * 1000)
 
-        emb_map = dict(zip(unique_texts, vectors))
+        emb_map = dict(zip(unique_chunks, chunk_vectors))
         t_score = time.monotonic()
-        scores = [_cosine_clamped(emb_map[a], emb_map[b]) for (a, b) in pairs]
+        # Max-pool over chunk-pair cosine matrix (MaxSim / ColBERT-lite):
+        # for pair (a, b) build the K_a x K_b cosine matrix and take the max.
+        # Two shards are duplicates if any region of one closely matches any
+        # region of the other. _cosine_clamped already returns [0, 1] so the
+        # running max stays in [0, 1] without re-clamping.
+        scores = []
+        for (a, b) in pairs:
+            a_chunks = text_chunks[a]
+            b_chunks = text_chunks[b]
+            if not a_chunks or not b_chunks:
+                scores.append(0.0)
+                continue
+            best = 0.0
+            for ca in a_chunks:
+                va = emb_map[ca]
+                for cb in b_chunks:
+                    s = _cosine_clamped(va, emb_map[cb])
+                    if s > best:
+                        best = s
+            scores.append(best)
         score_ms = int((time.monotonic() - t_score) * 1000)
 
     return {"scores": scores, "timing_ms": {"embed": embed_ms, "score": score_ms}}
