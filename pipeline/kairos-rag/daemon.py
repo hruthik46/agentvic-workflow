@@ -89,6 +89,15 @@ CHUNK_OVERLAP   = int(os.environ.get("KAIROS_RAG_CHUNK_OVERLAP", "200"))
 # Naming is dedup-specific; the indexer's chunkers are NOT modified.
 DEDUP_MIN_CHUNK_CHARS = int(os.environ.get("KAIROS_RAG_DEDUP_MIN_CHUNK_CHARS", "32"))
 
+# Dedup-side reduction: top-k mean over chunk-pair cosine matrix.
+# Motivated by D3-tune cluster gap of -0.1348 (residual false-positives at
+# threshold 0.78 are real semantic overlap on infrastructure vocabulary; pure
+# max-pool inflates these because a single high-cosine chunk pair drives the
+# whole score). Top-k mean dampens single-region inflation while keeping the
+# identical-pair invariant (every diagonal cell = 1.0 → top-3 mean = 1.0).
+# k clamps to len(matrix) so single-cell matrices degrade gracefully to max-pool.
+DEDUP_TOPK = int(os.environ.get("KAIROS_RAG_DEDUP_TOPK", "3"))
+
 
 # ---------------------------------------------------------------------------
 # Chunkers — VERBATIM copy from /usr/local/bin/kairos-rag-indexer (lines 124-156).
@@ -360,11 +369,12 @@ async def handle_score_pairs(req: dict) -> dict:
 
         emb_map = dict(zip(unique_chunks, chunk_vectors))
         t_score = time.monotonic()
-        # Max-pool over chunk-pair cosine matrix (MaxSim / ColBERT-lite):
-        # for pair (a, b) build the K_a x K_b cosine matrix and take the max.
-        # Two shards are duplicates if any region of one closely matches any
-        # region of the other. _cosine_clamped already returns [0, 1] so the
-        # running max stays in [0, 1] without re-clamping.
+        # D4: top-k mean over chunk-pair cosine matrix. For pair (a, b) build
+        # the K_a x K_b cosine matrix in flat form, then average the top-k
+        # cells (k clamped to len(matrix)). Identical-pair invariant holds:
+        # every diagonal cell is 1.0, so top-k mean = 1.0. Single-cell
+        # matrices degrade to max-pool. _cosine_clamped already returns [0,1]
+        # so the mean is in [0,1]; the explicit clamp is numerical safety.
         scores = []
         for (a, b) in pairs:
             a_chunks = text_chunks[a]
@@ -372,14 +382,15 @@ async def handle_score_pairs(req: dict) -> dict:
             if not a_chunks or not b_chunks:
                 scores.append(0.0)
                 continue
-            best = 0.0
+            matrix_flat = []
             for ca in a_chunks:
                 va = emb_map[ca]
                 for cb in b_chunks:
-                    s = _cosine_clamped(va, emb_map[cb])
-                    if s > best:
-                        best = s
-            scores.append(best)
+                    matrix_flat.append(_cosine_clamped(va, emb_map[cb]))
+            k = min(DEDUP_TOPK, len(matrix_flat))
+            topk = sorted(matrix_flat, reverse=True)[:k]
+            score = sum(topk) / k
+            scores.append(max(0.0, min(1.0, score)))
         score_ms = int((time.monotonic() - t_score) * 1000)
 
     return {"scores": scores, "timing_ms": {"embed": embed_ms, "score": score_ms}}
